@@ -160,7 +160,7 @@ class StableDiffusionModel(pl.LightningModule):
                 return self._fabric_wrapped.barrier()
                 
         return self.generate_samples_seq(logger, current_epoch, global_step)
-
+    @torch.no_grad()
     def generate_samples_dist(self, logger, current_epoch, global_step):
         config = self.config.sampling
         generator = torch.Generator(device="cpu").manual_seed(config.seed)

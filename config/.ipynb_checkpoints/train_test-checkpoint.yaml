@@ -6,8 +6,9 @@ model:
     
 trainer:
   model_path: /workspace/output/v0.2/ep13/checkpoint-e1_s39259.safetensors
-  checkpoint_dir: /workspace/output/v0.2/ep14_15
-  batch_size: 32
+  checkpoint_dir: /workspace/output/v0.2/test_save_sample
+  # batch_size: 32
+  batch_size: 8
   seed: 1138
   wandb_id: "noobai"
   use_xformers: true
@@ -16,8 +17,8 @@ trainer:
 
   save_format: safetensors
   checkpoint_freq: 1
-  checkpoint_steps: 1000
-  save_weights_only: true
+  checkpoint_steps: 5
+  save_weights_only: false
   max_epochs: 2
   max_steps: -1
 
@@ -38,14 +39,26 @@ advanced:
   do_edm_style_training: false
   # gradient_checkpointing: true
   
+# lightning:
+#   accelerator: gpu
+#   devices: 8        
+#   num_nodes: 1        
+#   precision: bf16-mixed
+#   strategy: deepspeed 
+#   strategy_params:   
+#     stage: 2
 lightning:
   accelerator: gpu
   devices: 8        
   num_nodes: 1        
   precision: bf16-mixed
   strategy: deepspeed 
-  strategy_params:   
+  strategy_params:
     stage: 2
+    config: "/workspace/ti/UwULLM/config/ds.json"  
+    zero_optimization:
+      stage: 2 
+
 
 dataset:
   name: data.bucket.AspectRatioDataset 
@@ -81,17 +94,20 @@ scheduler:
 
     
 sampling:
-  enabled: false
+  enabled: true
   use_wandb: true
   seed: 1234
   height: 1280
   width: 768
-  every_n_steps: 100
+  every_n_steps: 10
   every_n_epochs: 1
-  save_dir: "samples"
+  save_dir: "/workspace/output/sample"
   prompts: 
-    - "best quality, a girl with a yellow hat and a yellow shirt, sitting, white legwear, uniform, jacket, thighhighs, bare shoulders, high contrast, paint splatter"
-    - "best quality, 1girl, solo, loli, cat girl, silver hair ,blue eyes, flat chest, solo, beautiful detailed background, messy hair, long hair"
-    - "masterpiece, best quality, 1girl, solo,loli,wedding dress|see-through highleg leotard, veil, elbow gloves, white thighhighs, crown, earrings, bow on waist, sideboob, lace,"
-    - "1girl, solo, shirt, thighhighs, skirt, hands on hips, white shirt, crystal, flandre scarlet, blonde hair, grey skirt, red bow, red eyes, black thighhighs, wings, white background,"
-    - "1girl,sitting,fantasy,masterpiece,best quality,(long blonde hair),(blue eyes),(floating hair),(black ribbed sweater:1.1),(red plaid skirt:1.1),(cat ears)"
+    - " yunsang,honkai: star rail,stelle /(honkai: star rail/),year 2025,game cg,game cg,highres,1girl,invisible_chair,c:,v_over_eye,bare feet,from_side,knee up"
+    - "hikikomari kyuuketsuki no monmon, terakomari gandezblood, 1girl, :d, ahoge, belt, black belt, black bow, blonde hair, blue bow, blue bowtie, blush, bow, bowtie, buttons, concert, cone hair bun, cowboy shot, double-breasted, double bun, eyelashes, fang, floating hair, glowstick, hair between eyes, hair bow, hair bun, hair intakes, hand up, holding, holding microphone, jacket, jewelry, leaning forward, long hair, long sleeves, looking at viewer, microphone, open mouth, outstretched arm, pendant, red eyes, red jacket, sidelocks, slit pupils, smile, solo, v, very long hair,(koujuan:1.1), (rella:1.1), ruoganzhao, (ningen mame:0.7), (watercolor:1.2),masterpiece, best quality, newest, absurdres, highres, high resolution, aesthetic, excellent, year 2025, newest,"
+    - "1girl stella sora, tyrant/(stella sora/), female tyrant /(stella sora/), 1girl, ahoge, black dress, black gloves, blue dress, blue eyes, blue hairband, blunt sidelocks, breasts, cellphone, dress, gloves, grey hair, hairband, holding, holding phone, invisible chair, layered dress, long hair, looking at viewer, phone, pointy ears, sidelocks, simple background, sitting, sleeveless, sleeveless dress, small breasts, smartphone, smile, solo, thighhighs, white background, white thighhighs,(koujuan:1.1), (rella:1.1), ruoganzhao, (ningen mame:0.7), (watercolor:1.2),masterpiece, best quality, newest, absurdres, highres, high resolution, aesthetic, excellent, year 2025, newest,"
+    - "2girls, fern /(frieren/), frieren beyond journey's suspenders, frieren, (morikura en:0.95), (ogipote:0.9), (quasarcake:0.75), (kachayori:0.8), (toosaka asagi:0.85), (fuzichoco:1.1), void 0, (wlop:0.7), solo, oil skin, shiny skin, dappled sunlight, nature, tree, summer, falling leaves,purple_hair,  large breasts,pointy ears, red earrings, twintails, white capelet, gold trim, striped shirt, dangle earrings,breasts, long hair, bow, leaf, sunlight, sitting on person,clothes lift,  hand on another's chin ,looking at another,  sitting on lap,masterpiece, best quality, amazing quality, absurdres, highres, very aesthetic, 2girls, asymmetrical docking,water, on side,best shadow, colorful, ray tracing, lens flare, sparkle, chromatic aberration, film grain, scenery,"
+    - " ye shunguang, 1girl, animal ears, blush, breasts, brown cardigan, brown hair, cardigan, closed mouth, clover hair ornament, collared shirt, droopy ears, fox ears, fox girl, hair intakes, hair ornament, hairband, long hair, long sleeves, looking at viewer, red eyes, school uniform, shirt, solo, v, very long hair, white hairband, white shirt"
+    - "artist:moruki,artist:karanagare,artist:daylightallure,artist:sheya_tin,artist:chunbuchou,shorekeeper_(wuthering_waves),1girl,solo,"
+    - "1girl, solo, smile, long hair, artoria caster (fate),ssambatea,minenami_ryou,dev_(dev0614),unexistarts,mzh"
+    - " 1girl, solo, smile, long hair, artoria caster (fate),ssambatea,minenami_ryou,dev_(dev0614),unexistarts,mzh,(artist：creayus:0.8),（artist：uenomigi：0.6）,（massakasama：0.6）"

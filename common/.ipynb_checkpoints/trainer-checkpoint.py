@@ -42,6 +42,8 @@ class Trainer:
         
         strategy_path = self.model.config.lightning.get("strategy", "")
         self.is_deepspeed = isinstance(self.fabric.strategy, DeepSpeedStrategy)
+
+
                 
     def prepare_logger(self):
         """Prepare the logger and log hyperparameters if the logger is not CSVLogger."""
@@ -94,38 +96,75 @@ class Trainer:
             self.optimizer.train()
 
     def save_model(self, is_last: bool = False):
-        config = self.model.config
-        cfg = config.trainer
+    
+        cfg = self.model.config.trainer
+        ckpt_dir = cfg.checkpoint_dir
+    
         ckpt_st = cfg.checkpoint_steps
         ckpt_fq = cfg.checkpoint_freq
-        ckpt_dir = cfg.checkpoint_dir
+    
         is_ckpt_step = ckpt_st > 0 and self.global_step % ckpt_st == 0
         is_ckpt_epoch = ckpt_fq > 0 and self.current_epoch % ckpt_fq == 0
-        should_save = (is_last and is_ckpt_epoch) or is_ckpt_step
-        if not should_save:
+    
+        if not ((is_last and is_ckpt_epoch) or is_ckpt_step):
             return
-        if "schedulefree" in self.optimizer.__class__.__name__.lower():
-            self.optimizer.eval()
+    
         postfix = f"e{self.current_epoch}_s{self.global_step}"
-        model_path = os.path.join(ckpt_dir, f"checkpoint-{postfix}")
-        save_weights_only = cfg.get("save_weights_only", False)
-        logger.info("Saving model checkpoint")
-        metadata = {"global_step": str(self.global_step), "current_epoch": str(self.current_epoch)}
-        self.model.save_checkpoint(model_path, metadata)
-        if not save_weights_only:
-            if "NextDiT" in self.model.config.model.name:
-                optimizer_state = {"optimizer": self.optimizer, **metadata}
-                opt_state_fn = f"optimizer.{self.fabric.get_rank():05d}-of-" f"{self.fabric.get_world_size():05d}.pth"
-                torch.save(self.optimizer.state_dict(), os.path.join(model_path, opt_state_fn))
-                self.fabric.barrier()
-                logger.info(f"Saved optimizer to {model_path}.")
-                if self.fabric.get_rank() == 0:
-                    torch.save(self.model.config, os.path.join(model_path, "model_args.pth"))
-                    with open(os.path.join(model_path, "resume_step.txt"), "w") as f:
-                        print(self.global_step + 1, file=f)
-            self.fabric.save(model_path + "_optimizer.pt", optimizer_state)
-        if "schedulefree" in self.optimizer.__class__.__name__.lower():
-            self.optimizer.train()
+        path = os.path.join(ckpt_dir, f"checkpoint-{postfix}")
+    
+        logger.info(f"Saving checkpoint to {path}")
+    
+        metadata = {
+            "global_step": self.global_step,
+            "current_epoch": self.current_epoch,
+        }
+    
+        strategy = self.fabric.strategy
+    
+        # =========================
+        # DeepSpeed
+        # =========================
+        if hasattr(strategy, "_deepspeed_engine"):
+            logger.info("Saving DeepSpeed checkpoint")
+            strategy._deepspeed_engine.save_checkpoint(
+                path,
+                client_state=metadata
+            )
+    
+        # =========================
+        # FSDP
+        # =========================
+        elif hasattr(strategy, "_fsdp_kwargs"):
+            logger.info("Saving FSDP checkpoint")
+            self.fabric.save(
+                path,
+                {
+                    "model": self.model,
+                    "optimizer": self.optimizer,
+                    "metadata": metadata,
+                }
+            )
+    
+        # =========================
+        # DDP / 单卡
+        # =========================
+        else:
+            logger.info("Saving DDP/single-device checkpoint")
+            self.fabric.save(
+                path,
+                {
+                    "state_dict": self.model.state_dict(),
+                    "optimizer": self.optimizer.state_dict(),
+                    "metadata": metadata,
+                }
+            )
+
+
+
+
+
+
+
 
     def perform_sampling(self, is_last: bool = False):
         config = self.model.config
@@ -273,9 +312,12 @@ class Trainer:
                     
                     assert fabric_module is not None, "Model setup failed."
 
-                    with fabric.no_backward_sync(fabric_module, enabled=is_accumulating):
-                        loss = self.model(batch)
-                        self.fabric.backward(loss / grad_accum_steps)
+                    # with fabric.no_backward_sync(fabric_module, enabled=is_accumulating):
+                    #     loss = self.model(batch)
+                    #     self.fabric.backward(loss / grad_accum_steps)
+                    loss = self.model(batch)
+                    self.fabric.backward(loss)
+
 
                     loss = loss.detach().item()
                     stat_str = f"loss: {loss:.3f}"

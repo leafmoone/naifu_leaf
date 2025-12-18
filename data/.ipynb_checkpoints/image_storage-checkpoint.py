@@ -416,7 +416,7 @@ class DirectoryImageStore(StoreBase):
 
 class ChunkedDirectoryImageStore(StoreBase):
     def __init__(self, *args, **kwargs):
-        self.chunk_size_gb = kwargs.get("chunk_size_gb", 400)
+        self.chunk_size_gb = kwargs.get("chunk_size_gb", 5)
         self.copy_workers = kwargs.get("copy_workers", 8)
         self.use_shm = True
         self.transforms = IMAGE_TRANSFORMS
@@ -425,7 +425,7 @@ class ChunkedDirectoryImageStore(StoreBase):
 
         self._log(f"Initializing ChunkedStore. Root: {self.root_path}")
         
-        import json
+        
         
         cache_path = self.root_path / "dataset_index_cache.json"
         
