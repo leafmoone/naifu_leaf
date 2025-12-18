@@ -121,9 +121,6 @@ class Trainer:
     
         strategy = self.fabric.strategy
     
-        # =========================
-        # DeepSpeed
-        # =========================
         if hasattr(strategy, "_deepspeed_engine"):
             logger.info("Saving DeepSpeed checkpoint")
             strategy._deepspeed_engine.save_checkpoint(
@@ -131,9 +128,6 @@ class Trainer:
                 client_state=metadata
             )
     
-        # =========================
-        # FSDP
-        # =========================
         elif hasattr(strategy, "_fsdp_kwargs"):
             logger.info("Saving FSDP checkpoint")
             self.fabric.save(
@@ -145,9 +139,6 @@ class Trainer:
                 }
             )
     
-        # =========================
-        # DDP / 单卡
-        # =========================
         else:
             logger.info("Saving DDP/single-device checkpoint")
             self.fabric.save(
