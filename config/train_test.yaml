@@ -5,10 +5,10 @@ model:
     name: StableDiffusionXL
     
 trainer:
-  model_path: /workspace/output/v0.2/ep13/checkpoint-e1_s39259.safetensors
-  checkpoint_dir: /workspace/output/v0.2/test_save_sample
+  model_path: /workspace/output/v0.2/ep14_15/checkpoint-e2_s78518.safetensors
+  checkpoint_dir: /workspace/output/v0.2/ep16
   # batch_size: 32
-  batch_size: 8
+  batch_size: 32
   seed: 1138
   wandb_id: "noobai"
   use_xformers: true
@@ -17,9 +17,9 @@ trainer:
 
   save_format: safetensors
   checkpoint_freq: 1
-  checkpoint_steps: 5
+  checkpoint_steps: 1000
   save_weights_only: false
-  max_epochs: 2
+  max_epochs: 1
   max_steps: -1
 
 advanced:
@@ -73,6 +73,10 @@ dataset:
   max_token_length: 225 # [75, 150, 225]
   load_into_memory: true
   num_workers: 12
+  chunk_size_gb: 400
+  copy_workers: 8
+
+  
 optimizer:
   name: bitsandbytes.optim.AdamW8bit
   params:
@@ -99,9 +103,9 @@ sampling:
   seed: 1234
   height: 1280
   width: 768
-  every_n_steps: 10
+  every_n_steps: 1000
   every_n_epochs: 1
-  save_dir: "/workspace/output/sample"
+  save_dir: "/workspace/output/sample/ep16"
   prompts: 
     - " yunsang,honkai: star rail,stelle /(honkai: star rail/),year 2025,game cg,game cg,highres,1girl,invisible_chair,c:,v_over_eye,bare feet,from_side,knee up"
     - "hikikomari kyuuketsuki no monmon, terakomari gandezblood, 1girl, :d, ahoge, belt, black belt, black bow, blonde hair, blue bow, blue bowtie, blush, bow, bowtie, buttons, concert, cone hair bun, cowboy shot, double-breasted, double bun, eyelashes, fang, floating hair, glowstick, hair between eyes, hair bow, hair bun, hair intakes, hand up, holding, holding microphone, jacket, jewelry, leaning forward, long hair, long sleeves, looking at viewer, microphone, open mouth, outstretched arm, pendant, red eyes, red jacket, sidelocks, slit pupils, smile, solo, v, very long hair,(koujuan:1.1), (rella:1.1), ruoganzhao, (ningen mame:0.7), (watercolor:1.2),masterpiece, best quality, newest, absurdres, highres, high resolution, aesthetic, excellent, year 2025, newest,"

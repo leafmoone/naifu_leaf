@@ -95,30 +95,34 @@ class Trainer:
         if "schedulefree" in self.optimizer.__class__.__name__.lower():
             self.optimizer.train()
 
+
     def save_model(self, is_last: bool = False):
-    
         cfg = self.model.config.trainer
         ckpt_dir = cfg.checkpoint_dir
     
         ckpt_st = cfg.checkpoint_steps
         ckpt_fq = cfg.checkpoint_freq
+        save_weights_only = cfg.get("save_weights_only", False)
     
         is_ckpt_step = ckpt_st > 0 and self.global_step % ckpt_st == 0
         is_ckpt_epoch = ckpt_fq > 0 and self.current_epoch % ckpt_fq == 0
-    
+        postfix = f"e{self.current_epoch}_s{self.global_step}"
+        # Check whether it's time to save the checkpoint
         if not ((is_last and is_ckpt_epoch) or is_ckpt_step):
             return
-    
-        postfix = f"e{self.current_epoch}_s{self.global_step}"
+        logger.info("Saving model checkpoint")
+        metadata = {"global_step": str(self.global_step), "current_epoch": str(self.current_epoch)}
         path = os.path.join(ckpt_dir, f"checkpoint-{postfix}")
-    
-        logger.info(f"Saving checkpoint to {path}")
-    
-        metadata = {
-            "global_step": self.global_step,
-            "current_epoch": self.current_epoch,
-        }
-    
+        self.model.save_checkpoint(path, metadata)
+        
+        # If we are saving model weights only
+        if save_weights_only:
+            logger.info("Saving model weights only")
+            return
+        
+
+        logger.info(f"Saving train state to {path}")
+        # Otherwise, save the full checkpoint with model, optimizer, and metadata
         strategy = self.fabric.strategy
     
         if hasattr(strategy, "_deepspeed_engine"):
@@ -127,7 +131,7 @@ class Trainer:
                 path,
                 client_state=metadata
             )
-    
+        
         elif hasattr(strategy, "_fsdp_kwargs"):
             logger.info("Saving FSDP checkpoint")
             self.fabric.save(
@@ -138,7 +142,7 @@ class Trainer:
                     "metadata": metadata,
                 }
             )
-    
+        
         else:
             logger.info("Saving DDP/single-device checkpoint")
             self.fabric.save(
@@ -149,7 +153,6 @@ class Trainer:
                     "metadata": metadata,
                 }
             )
-
 
 
 
