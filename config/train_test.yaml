@@ -67,7 +67,7 @@ dataset:
   min_size: 512
   max_size: 2048
   # img_path: "/workspace/dataset"
-  img_path: "/workspace/dataset"
+  img_path: "/workspace/dataset/10_add_other/10_nailong"
   # img_path: "/data/200_test"
   # num_workers: 0
   # process_batch_fn: "data.processors.shuffle_prompts_sdstyle"

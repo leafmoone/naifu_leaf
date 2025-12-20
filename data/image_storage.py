@@ -27,7 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm.auto import tqdm
 import psutil
 import threading
-
+import re
+import logging
 from PIL import Image
 
 image_suffix = set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp"])
@@ -38,6 +39,15 @@ IMAGE_TRANSFORMS = transforms.Compose(
         transforms.Normalize([0.5], [0.5]),
     ]
 )
+
+REPEAT_RE = re.compile(r"^(\d+)_")
+
+def extract_repeat_key(path: Path):
+    for p in path.parents:
+        m = REPEAT_RE.match(p.name)
+        if m:
+            return int(m.group(1)), p.name
+    return 1, "default"
 
 
 def get_class(name: str):
@@ -442,16 +452,24 @@ class ChunkedDirectoryImageStore(StoreBase):
             try:
                 with open(cache_path, "r") as f:
                     cache_data = json.load(f)
+                    # print("Loaded cache data:", cache_data) 
                 
                 for entry in cache_data:
                     entry["path"] = Path(entry["path"])
                     self.all_entries.append(entry)
-                
+                    repeat, key = extract_repeat_key(entry["path"])
+                    # self._log(f"repeat:{repeat}, key:{key}")
+                    entry["dataset_key"] = key  
+                    for _ in range(repeat):
+                        expanded.append(entry)
+                self.all_entries = expanded
+            
                 loaded_from_cache = True
                 self._log(f"Loaded {len(self.all_entries)} entries from cache.")
             except Exception as e:
                 self._log(f"Failed to load cache: {e}. Fallback to scanning.")
-        
+
+       
         if not loaded_from_cache:
             start_t = time.time()
             self._log(f"Scanning files in {self.root_path}...")
@@ -471,18 +489,21 @@ class ChunkedDirectoryImageStore(StoreBase):
                         try:
                             with open(p_txt, "r", encoding="utf-8", errors="ignore") as f:
                                 prompt = f.read().strip()
-                        except: 
-                            pass
-                    
+                        except Exception as e:
+                            self._log(f"Error reading {p_txt}: {e}")
+            
+                    # self._log(f"Processed {p} with prompt: {prompt} and resolution: {w}x{h}")
                     return {
                         "path": p,
                         "prompt": prompt,
                         "res": (h, w),
                         "bytes": f_size
                     }
-                except Exception:
+                except Exception as e:
+                    self._log(f"Failed to process {p}: {e}")  # Log the error for debugging
                     return None
-
+    
+    
             max_workers = 64 
             results = []
             
@@ -499,6 +520,22 @@ class ChunkedDirectoryImageStore(StoreBase):
                         results.append(res)
 
             self.all_entries = results
+            expanded = []
+            for entry in self.all_entries:
+                repeat, key = extract_repeat_key(entry["path"])
+                entry["dataset_key"] = key   
+                # self._log(f"key:{key},repeat:{repeat}")
+
+                for _ in range(repeat):
+                    expanded.append(entry)
+            # self._log(f"{expanded}")
+
+            self.all_entries = expanded
+            # for entry in self.all_entries:
+            #     self._log(f"new: {entry["dataset_key"]}")
+    
+    
+            
             scan_duration = time.time() - start_t
             if rank == 0:
                 print(f"[Rank {rank}] Indexing finished. Valid: {len(self.all_entries)}/{total_files}. Time: {scan_duration:.2f}s")
@@ -571,6 +608,8 @@ class ChunkedDirectoryImageStore(StoreBase):
             self._log(f"!!! INITIALIZATION DONE !!!")
         else:
             logger.error("Dataset is empty!")
+
+        # logger.info(f"repeat:{repeat},key:{key}")
 
     def _log(self, msg):
         try:
@@ -717,28 +756,31 @@ class ChunkedDirectoryImageStore(StoreBase):
         
         self._log(f"--- load_next_chunk COMPLETED ---")
 
+
     def get_raw_entry(self, index, visited=None):
         if visited is None:
             visited = set()
-
+    
         if index in visited:
             raise RuntimeError(
                 f"ChunkedDirectoryImageStore: all candidates in current chunk are bad. "
                 f"visited={len(visited)}"
             )
         visited.add(index)
-
-        p = self.paths[index]
-        prompt = self.prompts[index]
-        h, w = self.raw_res[index]
+    
+        # Get entry from all_entries using the index
+        entry = self.all_entries[index]
+        p = entry["path"]
+        prompt = entry["prompt"]
+        h, w = entry["res"]
         load_path = self.path_map.get(p, p)
+
         try:
             with Image.open(load_path) as _img:
                 img_pil = _img.convert("RGB")
             img = self.transforms(img_pil)
-            extras = self.get_batch_extras(p)
-            return False, img, prompt, (h, w), (0, 0), extras
-
+            return False, img, prompt, (h, w), (0, 0), entry
+    
         except Exception as e:
             bad = getattr(self, "_bad_indices", None)
             if bad is None:
