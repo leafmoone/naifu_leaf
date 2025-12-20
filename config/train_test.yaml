@@ -3,9 +3,10 @@ target: modules.train_sdxl.setup
 
 model:
     name: StableDiffusionXL
-    
 trainer:
   model_path: /workspace/output/v0.2/ep14_15/checkpoint-e2_s78518.safetensors
+  deepspeedresume_dir: /workspace/output/v0.2/ep16/checkpoint-e0_s5000
+  resume_from_deepspeed: true
   checkpoint_dir: /workspace/output/v0.2/ep16
   # batch_size: 32
   batch_size: 32

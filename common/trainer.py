@@ -11,6 +11,7 @@ from common.logging import logger
 from omegaconf import OmegaConf
 from pathlib import Path
 from lightning.fabric.strategies import DeepSpeedStrategy
+import safetensors.torch
 os.environ['NCCL_DEBUG'] = 'WARN'
 os.environ['TORCH_DISTRIBUTED_DEBUG'] = 'OFF' 
 
@@ -191,35 +192,39 @@ class Trainer:
         config = self.model.config
         fabric = self.fabric
         cfg = config.trainer
-        
+        logger.info(f"Config trainer: {cfg}")
+        logger.info("into train_loop")
         grad_accum_steps = cfg.accumulate_grad_batches
         grad_clip_val = cfg.gradient_clip_val
 
         local_step = 0
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
         latest_ckpt = get_latest_checkpoint(cfg.checkpoint_dir)
-        import safetensors.torch
-        if cfg.get("resume") and latest_ckpt:
-            opt_name = Path(latest_ckpt).stem + "_optimizer"
-            opt_path = Path(latest_ckpt).with_stem(opt_name).with_suffix(".pt")
-            if opt_path.is_file():
-                remainder = fabric.load(opt_path, {"optimizer": self.optimizer})
-                logger.info(f"Loaded optimizer state from {opt_path}")
-                self.global_step = int(remainder.pop("global_step", self.global_step))
-                self.current_epoch = int(remainder.pop("current_epoch", self.current_epoch))
+        if cfg.get("resume_from_deepspeed") :
+            logging.info(f"resume_from_deepspeed:{cfg.get("resume_from_deepspeed")}")
+            if hasattr(self.fabric.strategy, "_deepspeed_engine"):
+                logger.info("Resuming DeepSpeed checkpoint")
+                deepspeed_checkpoint_dir = cfg.deepspeedresume_dir  # Path to DeepSpeed checkpoint folder
+                self.fabric.strategy._deepspeed_engine.load_checkpoint(deepspeed_checkpoint_dir, load_optimizer_states=True)
+                logger.info(f"Resumed DeepSpeed checkpoint from {deepspeed_checkpoint_dir}")
+                logger.info(f"Resuming training from step {self.global_step} and epoch {self.current_epoch}")
             else:
-                if latest_ckpt.endswith(".ckpt"):
-                    sd = torch.load(latest_ckpt, map_location="cpu")
-                    self.global_step = int(sd.pop("global_step", self.global_step))
-                    self.current_epoch = int(sd.pop("current_epoch", self.current_epoch))
-                elif latest_ckpt.endswith(".safetensors"):
-                    with safetensors.torch.safe_open(latest_ckpt, framework="pt") as f:
-                        metadata = f.metadata()
-                        self.global_step = int(metadata.get("global_step", self.global_step))
-                        self.current_epoch = int(metadata.get("current_epoch", self.current_epoch))
-            logger.info(f"Resuming training from step {self.global_step} and epoch {self.current_epoch}")
-        else:
-            logger.info(f"Starting training from epoch {self.current_epoch}")
+                logging.info("error, hasattr:false")
+
+        if cfg.get("resume") and latest_ckpt:
+            if latest_ckpt.endswith(".ckpt"):
+                sd = torch.load(latest_ckpt, map_location="cpu")
+                self.global_step = int(sd.pop("global_step", self.global_step))
+                self.current_epoch = int(sd.pop("current_epoch", self.current_epoch))
+
+            elif latest_ckpt.endswith(".safetensors"):
+                with safetensors.torch.safe_open(latest_ckpt, framework="pt") as f:
+                    metadata = f.metadata()
+                    self.global_step = int(metadata.get("global_step", self.global_step))
+                    self.current_epoch = int(metadata.get("current_epoch", self.current_epoch))
+                    logger.info(f"Resuming training from step {self.global_step} and epoch {self.current_epoch}")
+            else:
+                logger.info(f"Starting training from epoch {self.current_epoch}")
 
         should_stop = False
         if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
@@ -238,6 +243,8 @@ class Trainer:
             fabric.print(f"Chunked training enabled. Found {total_chunks} chunks.")
         else:
             fabric.print("Standard training mode. Dataset is not chunked or not accessible.")
+
+
 
         progress_bar_total = len(self.dataloader)
         progress = ProgressBar(

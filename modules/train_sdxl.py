@@ -206,18 +206,18 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
     # =========================
     # 4. Resume（只加载权重）
     # =========================
-    if config.trainer.get("resume"):
-        latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
-        logger.info(f"Resume enabled. Latest ckpt: {latest_ckpt}")
-        if latest_ckpt:
-            sd = load_torch_file(ckpt=latest_ckpt, extract=False)
-            model.load_state_dict(sd.get("state_dict", sd))
-            meta = sd.get("metadata", {})
-            config.global_step = int(meta.get("global_step", 0))
-            config.current_epoch = int(meta.get("current_epoch", 0))
-            logger.info(
-                f"Resumed at epoch={config.current_epoch}, step={config.global_step}"
-            )
+    # if config.trainer.get("resume"):
+    #     latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
+    #     logger.info(f"Resume enabled. Latest ckpt: {latest_ckpt}")
+    #     if latest_ckpt:
+    #         sd = load_torch_file(ckpt=latest_ckpt, extract=False)
+    #         model.load_state_dict(sd.get("state_dict", sd))
+    #         meta = sd.get("metadata", {})
+    #         config.global_step = int(meta.get("global_step", 0))
+    #         config.current_epoch = int(meta.get("current_epoch", 0))
+    #         logger.info(
+    #             f"Resumed at epoch={config.current_epoch}, step={config.global_step}"
+    #         )
 
     # =========================
     # 5. Fabric 接管（🔥 最关键）
