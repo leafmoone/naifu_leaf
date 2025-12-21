@@ -446,6 +446,7 @@ class ChunkedDirectoryImageStore(StoreBase):
 
         self.all_entries = []
         loaded_from_cache = False
+        expanded = []
 
         if cache_path.exists():
             self._log(f"Found cache file: {cache_path}. Loading directly...")
@@ -454,14 +455,27 @@ class ChunkedDirectoryImageStore(StoreBase):
                     cache_data = json.load(f)
                     # print("Loaded cache data:", cache_data) 
                 
+                # for entry in cache_data:
+                #     entry["path"] = Path(entry["path"])
+                #     self.all_entries.append(entry)
+                #     repeat, key = extract_repeat_key(entry["path"])
+                #     # self._log(f"repeat:{repeat}, key:{key}")
+                #     entry["dataset_key"] = key  
+                #     # for _ in range(repeat):
+                #     #     expanded.append(entry)
+                # expanded.extend([entry] * repeat)
+
                 for entry in cache_data:
                     entry["path"] = Path(entry["path"])
                     self.all_entries.append(entry)
                     repeat, key = extract_repeat_key(entry["path"])
                     # self._log(f"repeat:{repeat}, key:{key}")
                     entry["dataset_key"] = key  
-                    for _ in range(repeat):
-                        expanded.append(entry)
+                
+                    expanded.extend([entry])
+                logger.warning(f"repeat:{repeat},new use cache")
+                
+
                 self.all_entries = expanded
             
                 loaded_from_cache = True
@@ -520,14 +534,15 @@ class ChunkedDirectoryImageStore(StoreBase):
                         results.append(res)
 
             self.all_entries = results
-            expanded = []
             for entry in self.all_entries:
                 repeat, key = extract_repeat_key(entry["path"])
                 entry["dataset_key"] = key   
                 # self._log(f"key:{key},repeat:{repeat}")
 
-                for _ in range(repeat):
-                    expanded.append(entry)
+                # for _ in range(repeat):
+                #     expanded.append(entry)
+                expanded.extend([entry] * repeat)
+                
             # self._log(f"{expanded}")
 
             self.all_entries = expanded
@@ -583,11 +598,13 @@ class ChunkedDirectoryImageStore(StoreBase):
         self._log(f"Dataset split into {len(self.chunks)} chunks (Target: {self.chunk_size_gb} GB).")
         
         self.current_chunk_idx = 0
-        self.path_map = {}
         
+        # self.buffers = [
+        #     Path("/dev/shm/naifu_buffer_0"),
+        #     Path("/dev/shm/naifu_buffer_1")
+        # ]
         self.buffers = [
-            Path("/dev/shm/naifu_buffer_0"),
-            Path("/dev/shm/naifu_buffer_1")
+            Path(f"/dev/shm/{entry['dataset_key']}_buffer_0") for entry in self.all_entries
         ]
         self.current_buffer_idx = 0 
         
@@ -646,7 +663,8 @@ class ChunkedDirectoryImageStore(StoreBase):
                 
                 def copy_task(entry):
                     src = entry["path"]
-                    dst_name = f"{hashlib.sha1(str(src).encode()).hexdigest()}{src.suffix}"
+                    # dst_name = f"{hashlib.sha1(str(src).encode()).hexdigest()}{src.suffix}"
+                    dst_name = f"{hashlib.sha1(str(src).encode()).hexdigest()}_{src.name}"
                     dst = buffer_path / dst_name
                     try:
                         shutil.copy2(src, dst)

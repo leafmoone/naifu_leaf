@@ -8,85 +8,8 @@ from common.logging import logger
 from modules.sdxl_model import StableDiffusionModel
 from modules.scheduler_utils import apply_snr_weight
 from lightning.pytorch.utilities.model_summary import ModelSummary
-
-# def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
-#     model_path = config.trainer.model_path
-#     model = SupervisedFineTune(
-#         model_path=model_path, 
-#         config=config, 
-#         device=fabric.device
-#     )
-#     dataset_class = get_class(config.dataset.get("name", "data.AspectRatioDataset"))
-#     dataset = dataset_class(
-#         batch_size=config.trainer.batch_size,
-#         rank=fabric.global_rank,
-#         dtype=torch.float32,
-#         **config.dataset,
-#     )
-#     dataloader = dataset.init_dataloader()
-
-#     params_to_optim = [{'params': model.model.parameters()}]
-#     if config.advanced.get("train_text_encoder_1"):
-#         lr = config.advanced.get("text_encoder_1_lr", config.optimizer.params.lr)
-#         params_to_optim.append(
-#             {"params": model.conditioner.embedders[0].parameters(), "lr": lr}
-#         )
-    
-#     if config.advanced.get("train_text_encoder_2"):
-#         lr = config.advanced.get("text_encoder_2_lr", config.optimizer.params.lr)
-#         params_to_optim.append(
-#             {"params": model.conditioner.embedders[1].parameters(), "lr": lr}
-#         )
-
-#     optim_param = config.optimizer.params
-#     optimizer = get_class(config.optimizer.name)(
-#         params_to_optim, **optim_param
-#     )
-#     scheduler = None
-#     if config.get("scheduler"):
-#         scheduler = get_class(config.scheduler.name)(
-#             optimizer, **config.scheduler.params
-#         )
-
-#     if config.trainer.get("resume"):
-#         latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
-#         remainder = {}
-#         if latest_ckpt:
-#             logger.info(f"Loading weights from {latest_ckpt}")
-#             remainder = sd = load_torch_file(ckpt=latest_ckpt, extract=False)
-#             if latest_ckpt.endswith(".safetensors"):
-#                 remainder = safetensors.safe_open(latest_ckpt, "pt").metadata()
-#             model.load_state_dict(sd.get("state_dict", sd))
-#             config.global_step = remainder.get("global_step", 0)
-#             config.current_epoch = remainder.get("current_epoch", 0)
-    
-#     model.first_stage_model.to(torch.float32)
-#     if fabric.is_global_zero and os.name != "nt":
-#         print(f"\n{ModelSummary(model, max_depth=1)}\n")
-    
-#     if hasattr(fabric.strategy, "_deepspeed_engine"):
-#         model, optimizer = fabric.setup(model, optimizer)
-#         model.get_module = lambda: model
-#         model._deepspeed_engine = fabric.strategy._deepspeed_engine
-#     elif hasattr(fabric.strategy, "_fsdp_kwargs"):
-#         model, optimizer = fabric.setup(model, optimizer)
-#         model.get_module = lambda: model
-#         model._fsdp_engine = fabric.strategy
-#     else:
-#         model.model, optimizer = fabric.setup(model.model, optimizer)
-#         if config.advanced.get("train_text_encoder_1") or config.advanced.get("train_text_encoder_2"):
-#             model.conditioner = fabric.setup(model.conditioner)
-    
-#     dataloader = fabric.setup_dataloaders(dataloader)
-#     if hasattr(model, "generate_samples"):
-#         fabric.model.mark_forward_method("generate_samples")
-
-
-#     model._fabric_wrapped = fabric
-
-
-
-#     return model, dataset, dataloader, optimizer, scheduler
+from torch.utils.data import DataLoader as TorchDataLoader
+from data.bucket import MultiSourceDataset
 def setup(fabric: pl.Fabric, config: OmegaConf):
 
     logger.info("=" * 80)
@@ -97,9 +20,6 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
     logger.info(f"World size: {fabric.world_size}")
     logger.info("=" * 80)
 
-    # =========================
-    # 1. 构建模型
-    # =========================
     logger.info("Building SupervisedFineTune model...")
     model = SupervisedFineTune(
         model_path=config.trainer.model_path,
@@ -110,9 +30,6 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
     logger.info(f"Model class: {model.__class__.__name__}")
     logger.info(f"Inner model class: {model.model.__class__.__name__}")
 
-    # =========================
-    # 2. Dataset & DataLoader
-    # =========================
     ds_cfg = config.dataset
     dataset_name = ds_cfg.get("name", "data.AspectRatioDataset")
     logger.info(f"Dataset name: {dataset_name}")
@@ -120,6 +37,8 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
     if dataset_name.endswith("MultiSourceDataset"):
         logger.info("Using MultiSourceDataset")
         datasets = []
+        repeats_source=ds_cfg.get("repeats_source", None)
+        shuffle=ds_cfg.get("shuffle", True)
 
         for i, sub_cfg in enumerate(ds_cfg.datasets):
             cls = get_class(sub_cfg["class"])
@@ -136,7 +55,8 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
 
         dataset = MultiSourceDataset(
             datasets=datasets,
-            probs=ds_cfg.get("probs")
+            repeats_source=repeats_source,
+            shuffle=shuffle
         )
 
         dataloader = TorchDataLoader(
@@ -203,65 +123,110 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
         )
         logger.info(f"Scheduler class: {scheduler.__class__.__name__}")
 
-    # =========================
-    # 4. Resume（只加载权重）
-    # =========================
-    # if config.trainer.get("resume"):
-    #     latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
-    #     logger.info(f"Resume enabled. Latest ckpt: {latest_ckpt}")
-    #     if latest_ckpt:
-    #         sd = load_torch_file(ckpt=latest_ckpt, extract=False)
-    #         model.load_state_dict(sd.get("state_dict", sd))
-    #         meta = sd.get("metadata", {})
-    #         config.global_step = int(meta.get("global_step", 0))
-    #         config.current_epoch = int(meta.get("current_epoch", 0))
-    #         logger.info(
-    #             f"Resumed at epoch={config.current_epoch}, step={config.global_step}"
-    #         )
+    # # =========================
+    # # 4. Resume（只加载权重）
+    # # =========================
+    # # if config.trainer.get("resume"):
+    # #     latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
+    # #     logger.info(f"Resume enabled. Latest ckpt: {latest_ckpt}")
+    # #     if latest_ckpt:
+    # #         sd = load_torch_file(ckpt=latest_ckpt, extract=False)
+    # #         model.load_state_dict(sd.get("state_dict", sd))
+    # #         meta = sd.get("metadata", {})
+    # #         config.global_step = int(meta.get("global_step", 0))
+    # #         config.current_epoch = int(meta.get("current_epoch", 0))
+    # #         logger.info(
+    # #             f"Resumed at epoch={config.current_epoch}, step={config.global_step}"
+    # #         )
 
-    # =========================
-    # 5. Fabric 接管（🔥 最关键）
-    # =========================
-    logger.info("Calling fabric.setup(model, optimizer)...")
-    model, optimizer = fabric.setup(model, optimizer)
-    logger.info("fabric.setup(model, optimizer) DONE")
+    # # =========================
+    # # 5. Fabric 接管（🔥 最关键）
+    # # =========================
+    # logger.info("Calling fabric.setup(model, optimizer)...")
+
+    
+    # model, optimizer = fabric.setup(model, optimizer)
+    # logger.info("fabric.setup(model, optimizer) DONE")
+    # logger.info("fabric.setup(model, optimizer) 111111111111111111111111111111111111111111111")
+
+    # dataloader = fabric.setup_dataloaders(dataloader)
+    # if hasattr(model, "generate_samples"):
+    #     try:
+    #         model.mark_forward_method("generate_samples")
+    #         logger.info("[OK] generate_samples marked as forward method")
+    #     except Exception as e:
+    #         logger.warning(f"Failed to mark generate_samples: {e}")
+    # logger.info("fabric.setup_dataloaders DONE")
+
+    # # =========================
+    # # 6. 分布式类型确认
+    # # =========================
+    # if hasattr(fabric.strategy, "_deepspeed_engine"):
+    #     logger.info(">>> Distributed backend: DeepSpeed (Lightning Fabric)")
+    #     engine = fabric.strategy._deepspeed_engine
+    #     logger.info(f"DeepSpeed engine type: {type(engine)}")
+    #     logger.info(f"ZeRO stage: {engine.zero_optimization_stage()}")
+    #     model._distributed_type = "deepspeed"
+        
+    #     model.get_module = lambda: model
+    #     model._deepspeed_engine = fabric.strategy._deepspeed_engine
+
+    # elif hasattr(fabric.strategy, "_fsdp_kwargs"):
+    #     logger.info(">>> Distributed backend: FSDP (Lightning Fabric)")
+    #     model._distributed_type = "fsdp"
+
+    # else:
+    #     logger.info(">>> Distributed backend: DDP / Single GPU")
+    #     model._distributed_type = "ddp"
+
+    # model._fabric = fabric
+
+    # logger.info("setup() finished successfully")
+    # logger.info("=" * 80)
+    # model._fabric_wrapped = fabric
+
+    # return model, dataset, dataloader, optimizer, scheduler
+
+    if config.trainer.get("resume"):
+        latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
+        remainder = {}
+        if latest_ckpt:
+            logger.info(f"Loading weights from {latest_ckpt}")
+            remainder = sd = load_torch_file(ckpt=latest_ckpt, extract=False)
+            if latest_ckpt.endswith(".safetensors"):
+                remainder = safetensors.safe_open(latest_ckpt, "pt").metadata()
+            model.load_state_dict(sd.get("state_dict", sd))
+            config.global_step = remainder.get("global_step", 0)
+            config.current_epoch = remainder.get("current_epoch", 0)
+        
+    model.first_stage_model.to(torch.float32)
+    if fabric.is_global_zero and os.name != "nt":
+        print(f"\n{ModelSummary(model, max_depth=1)}\n")
+        
+    if hasattr(fabric.strategy, "_deepspeed_engine"):
+        model, optimizer = fabric.setup(model, optimizer)
+        model.get_module = lambda: model
+        model._deepspeed_engine = fabric.strategy._deepspeed_engine
+        logger.info(">>> Distributed backend: DeepSpeed (Lightning Fabric)")
+        # engine = fabric.strategy._deepspeed_engine
+        # logger.info(f"DeepSpeed engine type: {type(engine)}")
+        # logger.info(f"ZeRO stage: {engine.zero_optimization_stage()}")
+        # model._distributed_type = "deepspeed"
+    elif hasattr(fabric.strategy, "_fsdp_kwargs"):
+        model, optimizer = fabric.setup(model, optimizer)
+        model.get_module = lambda: model
+        model._fsdp_engine = fabric.strategy
+    else:
+        model.model, optimizer = fabric.setup(model.model, optimizer)
+        if config.advanced.get("train_text_encoder_1") or config.advanced.get("train_text_encoder_2"):
+            model.conditioner = fabric.setup(model.conditioner)
+
+    if hasattr(model, "mark_forward_method"):
+        model.mark_forward_method('generate_samples')
 
     dataloader = fabric.setup_dataloaders(dataloader)
-    if hasattr(model, "generate_samples"):
-        try:
-            model.mark_forward_method("generate_samples")
-            logger.info("[OK] generate_samples marked as forward method")
-        except Exception as e:
-            logger.warning(f"Failed to mark generate_samples: {e}")
-    logger.info("fabric.setup_dataloaders DONE")
-
-    # =========================
-    # 6. 分布式类型确认
-    # =========================
-    if hasattr(fabric.strategy, "_deepspeed_engine"):
-        logger.info(">>> Distributed backend: DeepSpeed (Lightning Fabric)")
-        engine = fabric.strategy._deepspeed_engine
-        logger.info(f"DeepSpeed engine type: {type(engine)}")
-        logger.info(f"ZeRO stage: {engine.zero_optimization_stage()}")
-        model._distributed_type = "deepspeed"
-
-    elif hasattr(fabric.strategy, "_fsdp_kwargs"):
-        logger.info(">>> Distributed backend: FSDP (Lightning Fabric)")
-        model._distributed_type = "fsdp"
-
-    else:
-        logger.info(">>> Distributed backend: DDP / Single GPU")
-        model._distributed_type = "ddp"
-
-    model._fabric = fabric
-
-    logger.info("setup() finished successfully")
-    logger.info("=" * 80)
     model._fabric_wrapped = fabric
-
     return model, dataset, dataloader, optimizer, scheduler
-
-
 
 
 

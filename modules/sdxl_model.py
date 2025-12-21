@@ -164,6 +164,7 @@ class StableDiffusionModel(pl.LightningModule):
     def generate_samples_dist(self, logger, current_epoch, global_step):
         config = self.config.sampling
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
+        logger.info(f"config.seed:{config.seed}")
         prompts = list(config.prompts)
         images = []
         size = (config.get("height", 1024), config.get("width", 1024))
