@@ -48,15 +48,20 @@ def parse_args():
         args.config = first_args
     return args
 
+
 class ProgressBar:
     def __init__(self, total: int, disable=False):
+        self.disable = disable
+        self.progress = None
+
         if disable:
-            self.progress = None
             return
 
-        default_desc = "Epoch 0"
-        self.is_rich_progress = False
-        self.progress = tqdm(total=total, desc=default_desc)
+        self.progress = tqdm(
+            total=total,
+            desc="Epoch 0",
+            dynamic_ncols=True,
+        )
 
     def update(self, desc: str, step: int, status: str = ""):
         if not self.progress:
@@ -67,8 +72,23 @@ class ProgressBar:
 
         self.progress.n = step
         self.progress.set_description_str(desc)
-        self.progress.set_postfix_str(status)
+        if status:
+            self.progress.set_postfix_str(status)
+        self.progress.refresh()
 
+    def set_total(self, total: int):
+        if not self.progress:
+            return
+
+        self.progress.reset()
+        self.progress.total = total
+        self.progress.n = 0
+        self.progress.refresh()
+
+    def close(self):
+        if self.progress:
+            self.progress.close()
+            self.progress = None
 
 class LossRecorder:
     def __init__(self):

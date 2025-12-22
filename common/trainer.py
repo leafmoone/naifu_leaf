@@ -168,139 +168,148 @@ class Trainer:
         config = self.model.config
         fabric = self.fabric
         cfg = config.trainer
+    
         logger.info(f"Config trainer: {cfg}")
         logger.info("into train_loop")
+    
         grad_accum_steps = cfg.accumulate_grad_batches
-        grad_clip_val = cfg.gradient_clip_val
-
-        local_step = 0
+    
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-        latest_ckpt = get_latest_checkpoint(cfg.checkpoint_dir)
-
+    
         should_stop = False
         if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
             should_stop = True
-
+    
         self.prepare_logger()
-
-        chunk_store = getattr(self.dataset.datasets[0], 'store', None)
-        # chunk_store = getattr(self.dataset, 'store', None)
-        is_chunked_dataset = chunk_store is not None and hasattr(chunk_store, "load_next_chunk")
-        total_chunks = len(chunk_store.chunks) if is_chunked_dataset else 1
-
-        if is_chunked_dataset:
-            fabric.print(f"Chunked training enabled. Found {total_chunks} chunks.")
-        else:
-            fabric.print("Standard training mode. Dataset is not chunked or not accessible.")
-            logger.warning(f"is_chunked_dataset:{is_chunked_dataset},chunk_store:{chunk_store},self.dataset:{self.dataset}.self.dataset.datasets:{self.dataset.datasets[0].store}")
-            is_chunked_dataset=True
-            
-
-        progress_bar_total = len(self.dataloader)
+    
+        # === 收集每个 dataset 的 chunk store ===
+        datasets = self.dataset.datasets
+        chunk_stores = [getattr(ds, "store", None) for ds in datasets]
+    
+        def is_chunked(store):
+            return store is not None and hasattr(store, "load_next_chunk")
+    
+        def has_next_chunk(store):
+            return (
+                is_chunked(store)
+                and store.current_chunk_idx < len(store.chunks) - 1
+            )
+    
         progress = ProgressBar(
-            total=progress_bar_total,
+            total=len(self.dataloader),
             disable=not fabric.is_global_zero,
         )
-        assert len(self.dataloader) > 0, "Dataloader is empty"
-        
-        start_epoch = self.current_epoch
-
+    
+        # ===epoch loop===
         while not should_stop:
             if "schedulefree" in self.optimizer.__class__.__name__.lower():
                 self.optimizer.train()
-            for chunk_idx in range(total_chunks):
-                need_load = True
-                if self.current_epoch == start_epoch and chunk_idx == 0:
-                    need_load = False
-                
-                if is_chunked_dataset and need_load:
-                    logger.info(f"\n[Epoch {self.current_epoch}] Switching to Chunk {chunk_idx+1}/{total_chunks}...")
-                    t0 = time.time()
-                    chunk_store.load_next_chunk() 
-                    t1 = time.time()
-                    logger.info(f"Chunk loaded in {t1-t0:.2f}s. Images in memory: {len(chunk_store)}")
-                    logger.info("Re-initializing dataset batches for the new chunk...")
-                    self.dataset.init_batches() 
-                    logger.info("Re-initialization complete.")
-
-                    _workers = self.dataloader.num_workers
+    
+            # ====== chunk 状态机 ======
+            first_chunk = True
+    
+            while True:
+                # ---- 是否需要切 chunk ----
+                if not first_chunk:
+                    if not any(has_next_chunk(store) for store in chunk_stores):
+                        break  # 所有 dataset 都没 chunk 了
+    
+                    logger.info(f"[Epoch {self.current_epoch}] Switching chunk(s)...")
+    
+                    # 只推进「还能推进的 dataset」
+                    for ds, store in zip(datasets, chunk_stores):
+                        if has_next_chunk(store):
+                            store.load_next_chunk()
+                            ds.init_batches()
+    
+                    # 所有 dataset 切完 chunk 后，再统一 reset
+                    self.dataset.start_epoch()
+    
+                    # 重建 dataloader
                     _raw_loader = TorchDataLoader(
-                        self.dataset, 
+                        self.dataset,
                         batch_size=1,
-                        num_workers=_workers,
-                        collate_fn=lambda x: x[0], 
+                        num_workers=self.dataloader.num_workers,
+                        collate_fn=lambda x: x[0],
                         pin_memory=True,
                     )
-                    self.dataloader = self.fabric.setup_dataloaders(_raw_loader)
-                    progress_bar_total = len(self.dataloader)
-                    progress.total = progress_bar_total
-        
-                desc = f"Epoch {self.current_epoch}"
-                if is_chunked_dataset:
-                    desc += f" [C{chunk_idx+1}/{total_chunks}]"
+                    self.dataloader = fabric.setup_dataloaders(_raw_loader)
+                    progress.set_total(len(self.dataloader))
+
+                    logger.info(
+                        "[ChunkState] " +
+                        ", ".join(
+                            f"{ds.name}:{store.current_chunk_idx + 1}/{len(store.chunks)}"
+                            for ds, store in zip(datasets, chunk_stores)
+                            if store is not None
+                        )
+                    )
+
+    
+                first_chunk = False
+    
+                # ====== 训练当前 chunk 状态 ======
+                epoch_desc = f"Epoch {self.current_epoch}"
+                progress.update(epoch_desc, 0)
+                chunk_desc = " | ".join(
+                    f"{ds.name}:{store.current_chunk_idx + 1}/{len(store.chunks)}"
+                    for ds, store in zip(datasets, chunk_stores)
+                    if store is not None
+                )
                 
-                progress.update(desc, 0)
 
-                torch.cuda.empty_cache()
-                strategy = self.fabric.strategy
+    
                 for batch_idx, batch in enumerate(self.dataloader):
-                    is_accumulating = (batch_idx + 1) % grad_accum_steps != 0
-                    logger.info(f"source :{batch.get('source_dataset', 'unknown')}, idx:{batch_idx}")
-                    source = batch.get('source_dataset', 'unknown')
-                    raw_loss = self.model(batch)  # 用于日志，不进行bs缩放
+                    source = batch.get("source_dataset", "unknown")
+    
+                    raw_loss = self.model(batch)
                     bs = batch["pixels"].shape[0]
-                    scaled_loss = (raw_loss / bs)*4  # 用于 backward，进行bs缩放来避免不同分辨率样本的梯度不公平
-
-                 # 记录每个 batch 的大小和图像尺寸
-                    logger.info(f"Batch {batch_idx+1}/{len(self.dataloader)} | Batch size: {bs} | Image size: {batch['pixels'].shape[1:]}")
-
-                    # 计算本地梯度范数
-                    self.fabric.backward(scaled_loss)
+                    scaled_loss = (raw_loss / bs) * 4
+    
+                    fabric.backward(scaled_loss)
+    
                     grad_norm = None
-                    logger.warning(f"self.fabric.is_global_zero:{self.fabric.is_global_zero},self.is_deepspeed:{self.is_deepspeed}")
-                    if self.fabric.is_global_zero and self.is_deepspeed:
-                        # 获取DeepSpeed引擎的全局梯度范数
-                        grad_norm = strategy._deepspeed_engine.get_global_grad_norm()
-                        
-
-                    
-                    # 如果是DeepSpeed并且grad_norm不为None，记录梯度范数
-                    if grad_norm is not None and self.fabric.logger:
-                        self.fabric.log("train/grad_norm", grad_norm, step=self.global_step)
-
-
-
-  
-
-
-                    stat_str = f"raw_loss: {raw_loss.item():.3f}, scaled_loss: {scaled_loss.item():.6f}"
+                    if fabric.is_global_zero and self.is_deepspeed:
+                        grad_norm = fabric.strategy._deepspeed_engine.get_global_grad_norm()
+    
                     self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
-
+    
                     if self.scheduler is not None:
                         self.scheduler.step(self.global_step)
-
+    
+                    stat = f"loss={raw_loss.item():.4f}"
                     if grad_norm is not None:
-                        stat_str += f", grad_norm: {grad_norm:.6f}"
-                
-                    desc = f"Epoch {self.current_epoch} | Batch {batch_idx+1}/{len(self.dataloader)} | {stat_str}"
+                        stat += f", grad_norm={grad_norm:.4f}"
+    
+                    progress.update(
+                        f"{epoch_desc} |{chunk_desc}| {stat} | {source}",
+                        batch_idx + 1,
+                    )
 
-                    # 记录训练指标
-                    progress.update(f"{desc} | {source}", batch_idx + 1)
-                    metrics = { "train/loss": raw_loss.item(), f"train/loss_{source}": raw_loss.item(), }
+                    metrics = {
+                        "train/loss": raw_loss.item(),
+                        f"train/loss_{source}": raw_loss.item(),
+                    }
                     if grad_norm is not None:
                         metrics["train/grad_norm"] = grad_norm
                         metrics[f"train/grad_norm_{source}"] = grad_norm
+    
                     if fabric.logger:
-                        fabric.log_dict(metrics=metrics, step=self.global_step)
+                        fabric.log_dict(metrics, step=self.global_step)
+    
                     self.global_step += 1
                     self.on_post_training_batch()
-
-            progress.close()  # 这里关闭进度条
-            logger.info(f"Epoch {self.current_epoch} 完成")
+                    # progress.set_total(len(self.dataloader))
+    
+            # ====== epoch 结束 ======
+            progress.close()
+            logger.info(f"Epoch {self.current_epoch} finished")
+    
             self.current_epoch += 1
             if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
                 should_stop = True
+    
             self.on_post_training_batch(is_last=True)
-
+    
 

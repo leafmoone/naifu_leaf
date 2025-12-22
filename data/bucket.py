@@ -426,3 +426,30 @@ class MultiSourceDataset(Dataset):
         batch["source_dataset"] = ds.name  # Add the source dataset name to the batch
 
         return batch
+
+
+    # def __getitem__(self, idx):
+    #     ds_idx = self.epoch_plan[idx]  # Get the dataset index from the epoch plan
+    #     ds = self.datasets[ds_idx]  # Get the actual dataset
+    
+    #     ptr = self.ptrs[ds_idx]  # Get the pointer for the dataset
+    
+    #     # Check if the current dataset is exhausted
+    #     if ptr >= len(ds):
+    #         # If exhausted, move to the next dataset in the plan
+    #         ds_idx = (ds_idx + 1) % len(self.datasets)  # Switch to the next dataset
+            
+    #         # Fetch the next dataset and its batch
+    #         ds = self.datasets[ds_idx]
+    #         logger.warning(f"ptr >= len(ds)!!!!!")
+    #         ptr = self.ptrs[ds_idx]
+    #         # ptr = 0  # Reset pointer to 0 for the next dataset (we will only do this once for the new dataset)
+    
+    #     batch = ds[ptr]  # Get the batch from the dataset
+    #     self.ptrs[ds_idx] += 1  # Increment the pointer for this dataset
+    
+    #     batch["_source_idx"] = ds_idx  # Add the source index to the batch
+    #     batch["source_dataset"] = ds.name  # Add the source dataset name to the batch
+    
+    #     return batch
+

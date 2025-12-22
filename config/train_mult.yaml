@@ -15,9 +15,9 @@ trainer:
   gradient_clip_val: 1.0
 
   save_format: safetensors
-  checkpoint_freq: 1
-  checkpoint_steps: 1
-  save_weights_only: false
+  checkpoint_freq: 20
+  checkpoint_steps: 500
+  save_weights_only: true
   max_epochs: 200
   max_steps: -1
 
@@ -64,7 +64,7 @@ lightning:
 
 dataset:
   name: data.bucket.MultiSourceDataset
-  repeats_source: [4,1]
+  repeats_source: [1,1]
   shuffle: true
 
   datasets:
@@ -77,8 +77,8 @@ dataset:
       max_size: 2048
       max_token_length: 225
       load_into_memory: true
-      num_workers: 24
-      chunk_size_gb: 20
+      num_workers: 32
+      chunk_size_gb: 0.1
       copy_workers: 12
 
     - name: small_256
@@ -91,9 +91,22 @@ dataset:
       max_size: 512
       max_token_length: 225
       load_into_memory: true
-      num_workers: 24
-      chunk_size_gb: 10
+      num_workers: 64
+      chunk_size_gb: 1
       copy_workers: 16
+
+    # - name: main_1024
+    #   class: data.bucket.AspectRatioDataset
+    #   batch_size: 128
+    #   img_path: "/workspace/dataset/1_dan_dataset"
+    #   target_area: 1_048_576
+    #   min_size: 512
+    #   max_size: 2048
+    #   max_token_length: 225
+    #   load_into_memory: true
+    #   num_workers: 32
+    #   chunk_size_gb: 300
+    #   copy_workers: 12
 
     # - name: small_512
     #   class: data.bucket.AspectRatioDataset

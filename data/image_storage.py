@@ -603,9 +603,16 @@ class ChunkedDirectoryImageStore(StoreBase):
         #     Path("/dev/shm/naifu_buffer_0"),
         #     Path("/dev/shm/naifu_buffer_1")
         # ]
+        # self.buffers = [
+        #     Path(f"/dev/shm/{entry['dataset_key']}_buffer_0") for entry in self.all_entries
+        # ]
         self.buffers = [
-            Path(f"/dev/shm/{entry['dataset_key']}_buffer_0") for entry in self.all_entries
+            Path(f"/dev/shm/{entry['dataset_key']}_buffer_{i}") 
+            for entry in self.all_entries 
+            for i in [0, 1]
         ]
+
+
         self.current_buffer_idx = 0 
         
         self.prefetch_thread = None
