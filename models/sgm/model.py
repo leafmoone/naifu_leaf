@@ -368,7 +368,7 @@ class UNetModel(nn.Module):
         out_channels,
         num_res_blocks,
         attention_resolutions,
-        dropout=0.1,
+        dropout=0,
         channel_mult=(1, 2, 4, 8),
         conv_resample=True,
         dims=2,
@@ -449,7 +449,6 @@ class UNetModel(nn.Module):
 
         self.attention_resolutions = attention_resolutions
         self.dropout = dropout
-        logger.info(f"Dropout value set to: {dropout}")
         self.channel_mult = channel_mult
         self.conv_resample = conv_resample
         self.num_classes = num_classes

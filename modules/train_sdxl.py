@@ -33,13 +33,12 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
     ds_cfg = config.dataset
     dataset_name = ds_cfg.get("name", "data.AspectRatioDataset")
     logger.info(f"Dataset name: {dataset_name}")
-
+    
     if dataset_name.endswith("MultiSourceDataset"):
         logger.info("Using MultiSourceDataset")
+    
         datasets = []
-        repeats_source=ds_cfg.get("repeats_source", None)
-        shuffle=ds_cfg.get("shuffle", True)
-
+    
         for i, sub_cfg in enumerate(ds_cfg.datasets):
             cls = get_class(sub_cfg["class"])
             logger.info(f"  Sub-dataset[{i}]: {cls.__name__}")
@@ -48,25 +47,49 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
                 img_path=sub_cfg.img_path,
                 rank=fabric.global_rank,
                 dtype=torch.float32,
+                name=sub_cfg.name,
                 **{k: v for k, v in sub_cfg.items()
                    if k not in ["class", "batch_size", "img_path", "name"]}
             )
+            ds._source_name = getattr(ds, "name", sub_cfg.get("name", f"none"))
+            ds._chunk_store = getattr(ds, "store", None)
             datasets.append(ds)
 
-        dataset = MultiSourceDataset(
-            datasets=datasets,
-            repeats_source=repeats_source,
-            shuffle=shuffle
-        )
+        dataloaders = []
+        for ds in datasets:
+            dl = TorchDataLoader(
+                ds,
+                batch_size=1,
+                shuffle=False,
+                num_workers=ds.num_workers,
+                collate_fn=lambda x: x[0],
+                pin_memory=True,
+                # persistent_workers=True,
+            )
 
+            dataloaders.append(dl)
+
+    
+        dataloaders = [
+            fabric.setup_dataloaders(dl)
+            for dl in dataloaders
+        ]
+    
+        dataset = MultiSourceDataset(
+            dataloaders=dataloaders,
+            datasets = datasets,
+            # mode="round_robin"   # 或 random
+            mode="random"
+        )
         dataloader = TorchDataLoader(
             dataset,
-            batch_size=1,
-            shuffle=False,
+            batch_size=None,     
             num_workers=0,
-            collate_fn=lambda x: x[0],
-            pin_memory=True,
+            pin_memory=False,
         )
+        
+
+ 
     else:
         logger.info("Using single dataset")
         dataset_class = get_class(dataset_name)
@@ -78,7 +101,7 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
         )
         dataloader = dataset.init_dataloader()
 
-    logger.info(f"Dataset length: {len(dataset)}")
+    # logger.info(f"Dataset length: {len(dataset)}")
 
     # =========================
     # 3. Optimizer
@@ -205,9 +228,14 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
         
     if hasattr(fabric.strategy, "_deepspeed_engine"):
         model, optimizer = fabric.setup(model, optimizer)
-        model.get_module = lambda: model
-        model._deepspeed_engine = fabric.strategy._deepspeed_engine
+        # model.get_module = lambda: model
+        # model._deepspeed_engine = fabric.strategy._deepspeed_engine
         logger.info(">>> Distributed backend: DeepSpeed (Lightning Fabric)")
+
+        engine = fabric.strategy._deepspeed_engine
+        logger.info(f"DeepSpeed engine type: {type(engine)}")
+        logger.info(f"ZeRO stage: {engine.zero_optimization_stage()}")
+        model._distributed_type = "deepspeed"
         # engine = fabric.strategy._deepspeed_engine
         # logger.info(f"DeepSpeed engine type: {type(engine)}")
         # logger.info(f"ZeRO stage: {engine.zero_optimization_stage()}")
@@ -224,8 +252,21 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
     if hasattr(model, "mark_forward_method"):
         model.mark_forward_method('generate_samples')
 
-    dataloader = fabric.setup_dataloaders(dataloader)
+    # dataloader = fabric.setup_dataloaders(dataloader)
+    dataloader = fabric.setup_dataloaders(
+        dataloader,
+        use_distributed_sampler=False
+    )
+
+
+    
     model._fabric_wrapped = fabric
+
+    model._fabric = fabric
+
+    logger.info("setup() finished successfully")
+    logger.info("=" * 80)
+
     return model, dataset, dataloader, optimizer, scheduler
 
 

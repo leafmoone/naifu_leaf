@@ -432,6 +432,9 @@ class ChunkedDirectoryImageStore(StoreBase):
         self.transforms = IMAGE_TRANSFORMS
         super().__init__(*args, **kwargs)
         label_ext = self.kwargs.get("label_ext", ".txt")
+        # copy_workers = self.kwargs.get("copy_workers", 8)
+
+        logger.warning(f"chunk_size_gb:{self.chunk_size_gb},copy_workers:{self.copy_workers}")
 
         self._log(f"Initializing ChunkedStore. Root: {self.root_path}")
         
@@ -472,7 +475,7 @@ class ChunkedDirectoryImageStore(StoreBase):
                     # self._log(f"repeat:{repeat}, key:{key}")
                     entry["dataset_key"] = key  
                 
-                    expanded.extend([entry])
+                    expanded.extend([entry] * repeat)
                 logger.warning(f"repeat:{repeat},new use cache")
                 
 
@@ -745,7 +748,7 @@ class ChunkedDirectoryImageStore(StoreBase):
         self._log(f"Map built in {map_duration:.4f}s. Total images: {self.length}. Valid in SHM: {len(self.path_map)}")
 
     def load_next_chunk(self):
-        self._log(f"--- load_next_chunk CALLED ---")
+        # self._log(f"--- load_next_chunk CALLED ---")
         
         next_buffer_idx = (self.current_buffer_idx + 1) % 2
         target_chunk_idx = self.next_chunk_idx
@@ -762,9 +765,9 @@ class ChunkedDirectoryImageStore(StoreBase):
                 self._log("Background thread already finished.")
         
         if dist.is_initialized():
-            self._log("Entering Barrier (Waiting for Rank 0)...")
+            # self._log("Entering Barrier (Waiting for Rank 0)...")
             dist.barrier()
-            self._log("Exited Barrier.")
+            # self._log("Exited Barrier.")
 
         self._build_map_and_switch(target_chunk_idx, self.buffers[next_buffer_idx])
         
@@ -779,7 +782,7 @@ class ChunkedDirectoryImageStore(StoreBase):
         self._log(f"Scheduling next prefetch: Chunk {next_prefetch_chunk_idx + 1} -> {self.buffers[prefetch_buffer_idx].name}")
         self._start_prefetch(next_prefetch_chunk_idx, self.buffers[prefetch_buffer_idx])
         
-        self._log(f"--- load_next_chunk COMPLETED ---")
+        # self._log(f"--- load_next_chunk COMPLETED ---")
 
 
     def get_raw_entry(self, index, visited=None):

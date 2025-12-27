@@ -65,6 +65,7 @@ def main():
     fabric.seed_everything(config.trainer.seed)
     Trainer(fabric, config).train_loop()
 
+
 if __name__ == "__main__":
     try:
         main()

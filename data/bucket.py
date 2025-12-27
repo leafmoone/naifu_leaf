@@ -365,67 +365,107 @@ class AdaptiveSizeDataset(RatioDataset):
 #         batch["source_dataset"] = ds.name  # Add the source dataset name to the batch
 
 #         return batch
+class DatasetExhausted(RuntimeError):
+    def __init__(self, ds_idx):
+        super().__init__(f"Dataset {ds_idx} exhausted")
+        # logger.warning(f"DatasetExhausted{ds_idx}")
+        self.source_idx = ds_idx
 
-class MultiSourceDataset(Dataset):
+from torch.utils.data import IterableDataset
 
-    def __init__(self, datasets, repeats_source=None, shuffle=True):
-        """
-        datasets: List[RatioDataset]
-        repeats_source:  List[int], same length as datasets
-                          default = [1, 1, ..., 1]
-        """
-        logger.warning(f"repeats_source:{repeats_source}")
+class MultiSourceDataset(IterableDataset):
+    """
+    Scheduler-style dataset.
+    Yields batches from multiple dataloaders.
+    """
+
+    def __init__(self, dataloaders,datasets,mode="round_robin"):
+        super().__init__()
+        self.dataloaders = dataloaders
+        self.mode = mode
         self.datasets = datasets
-        self.repeats_source = repeats_source or [1] * len(datasets)
-        self._log(f"repeats_source: {self.repeats_source}")
-        assert len(self.datasets) == len(self.repeats_source)
 
-        self.shuffle = shuffle
+        self.num_sources = len(dataloaders)
+        self._log_init()
+        self.alive = [True] * len(dataloaders)
 
-        self.epoch_plan = None
-        self.ptrs = None
-
-        self.start_epoch()
-
-    def _log(self, msg):
-        print(msg)
-
-    def start_epoch(self):
-        plan = []
+    def _log_init(self):
+        print("=" * 80)
+        print("[MultiSourceDataset] INIT")
+        print(f"  mode        : {self.mode}")
+        print(f"  num_sources : {self.num_sources}")
+        for i, ds in enumerate(self.datasets):
+            name = getattr(ds, "_source_name", f"source_{i}")
+            store = getattr(ds, "_chunk_store", None)
         
-        for ds_idx, (ds, rep) in enumerate(zip(self.datasets, self.repeats_source)):
-            self._log(f"Preparing dataset {ds_idx} (source: {ds.name}), Repeat: {rep}")
-            for _ in range(rep):
-                plan.extend([ds_idx] * len(ds)) 
+            if store is not None:
+                print(
+                    f"  source[{i}] : {name} "
+                    f"(chunk {store.current_chunk_idx+1}/{len(store.chunks)})"
+                )
+            else:
+                print(f"  source[{i}] : {name} (no chunk)")
 
-        if self.shuffle:
-            rng = torch.randperm(len(plan))
-            plan = [plan[i] for i in rng.tolist()]
+        print("=" * 80)
+        
+    def mark_dead(self, source_idx: int):
+        self.alive[source_idx] = False
+        # print(f"[MultiSourceDataset] source {source_idx} marked DEAD")
+        
+    def reset_alive(self):
+        self.alive = [True] * self.num_sources
+        # self.alive = [True] * len(dataloaders)
+        print("[MultiSourceDataset] reset alive flags")
+        logger.warning(f" self.alive:{ self.alive}")
 
-        self.epoch_plan = plan
-        self.ptrs = [0 for _ in self.datasets]
+        
+    def __iter__(self):
+        # print("[MultiSourceDataset] __iter__ called")
+    
+        iters = [iter(dl) for dl in self.dataloaders]
+        idx = 0
+    
+        while True:
+            alive_indices = [i for i, a in enumerate(self.alive) if a]
+            if not alive_indices:
+                logger.warning(" if not alive_indices")
+                raise StopIteration
+                
+            if self.mode == "round_robin":
+                # i = idx
+                i = alive_indices[idx % len(alive_indices)]
+                idx += 1
+                # idx = (idx + 1) % self.num_sources
+            else:  # random
+                i = random.choice(alive_indices)
+    
+            try:
+                batch = next(iters[i])
+            except StopIteration:
+                print(f"[MultiSourceDataset] source {i} exhausted → raise DatasetExhausted")
+                raise DatasetExhausted(i)
+    
+            ds = self.datasets[i]
+    
+            source_name = getattr(ds, "_source_name", f"source_{i}")
+            store = getattr(ds, "_chunk_store", None)
+    
+            if store is not None:
+                chunk_idx = store.current_chunk_idx + 1
+                chunk_total = len(store.chunks)
+            else:
+                chunk_idx = None
+                chunk_total = None
+    
+            batch["source_dataset"] = source_name
+            batch["_source_idx"] = i
+            batch["_chunk_idx"] = chunk_idx
+            batch["_chunk_total"] = chunk_total
+    
+    
+            yield batch
 
-    def __len__(self):
-        return len(self.epoch_plan)
 
-    def __getitem__(self, idx):
-        ds_idx = self.epoch_plan[idx]  # Get the dataset index from the epoch plan
-        ds = self.datasets[ds_idx]  # Get the actual dataset
-
-        ptr = self.ptrs[ds_idx]  # Get the pointer for the dataset
-        if ptr >= len(ds):
-            raise RuntimeError(
-                f"Dataset {ds.name} exhausted early. "
-                f"ptr={ptr}, len={len(ds)}"
-            )
-
-        batch = ds[ptr]  # Get the batch from the dataset
-        self.ptrs[ds_idx] += 1  # Increment the pointer for this dataset
-
-        batch["_source_idx"] = ds_idx  # Add the source index to the batch
-        batch["source_dataset"] = ds.name  # Add the source dataset name to the batch
-
-        return batch
 
 
     # def __getitem__(self, idx):

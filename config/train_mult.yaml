@@ -12,13 +12,14 @@ trainer:
   wandb_id: "noobai"
   use_xformers: true
   accumulate_grad_batches: 1
-  gradient_clip_val: 1.0
+  # gradient_clip_val: 1.0
+  gradient_clipping: 1.0
 
   save_format: safetensors
-  checkpoint_freq: 20
-  checkpoint_steps: 500
-  save_weights_only: true
-  max_epochs: 200
+  checkpoint_freq: 1
+  checkpoint_steps: 1000
+  save_weights_only: false
+  max_epochs: 1
   max_steps: -1
 
 advanced:
@@ -38,14 +39,39 @@ advanced:
   do_edm_style_training: false
   gradient_checkpointing: true
   
+# lightning:
+#   accelerator: gpu
+#   devices: 8        
+#   num_nodes: 1        
+#   precision: bf16-mixed
+#   strategy: deepspeed 
+#   strategy_params:   
+#     stage: 2
+#     gradient_clipping: 1.0
+
+
 lightning:
   accelerator: gpu
-  devices: 8        
-  num_nodes: 1        
-  precision: bf16-mixed
-  strategy: deepspeed 
-  strategy_params:   
-    stage: 2
+  devices: -1
+  strategy: common.deepspeed._sdxl_strategy_noob
+  precision: bf16
+
+# lightning:
+#   accelerator: gpu
+#   devices: 8
+#   precision: bf16-mixed
+#   strategy: deepspeed
+
+#   strategy_params:
+#     deepspeed_config:
+#       zero_optimization:
+#         stage: 2
+
+#       gradient_clipping: 1.0
+
+#       bf16:
+#         enabled: true
+
 
 # dataset:
 #   name: data.bucket.AspectRatioDataset 
@@ -64,7 +90,7 @@ lightning:
 
 dataset:
   name: data.bucket.MultiSourceDataset
-  repeats_source: [1,1]
+  # repeats_source: [1,1] #作废
   shuffle: true
 
   datasets:
@@ -77,8 +103,8 @@ dataset:
       max_size: 2048
       max_token_length: 225
       load_into_memory: true
-      num_workers: 32
-      chunk_size_gb: 0.1
+      num_workers: 1
+      chunk_size_gb: 10
       copy_workers: 12
 
     - name: small_256
@@ -91,36 +117,23 @@ dataset:
       max_size: 512
       max_token_length: 225
       load_into_memory: true
-      num_workers: 64
-      chunk_size_gb: 1
+      num_workers: 2
+      chunk_size_gb: 50
       copy_workers: 16
 
-    # - name: main_1024
-    #   class: data.bucket.AspectRatioDataset
-    #   batch_size: 128
-    #   img_path: "/workspace/dataset/1_dan_dataset"
-    #   target_area: 1_048_576
-    #   min_size: 512
-    #   max_size: 2048
-    #   max_token_length: 225
-    #   load_into_memory: true
-    #   num_workers: 32
-    #   chunk_size_gb: 300
-    #   copy_workers: 12
-
-    # - name: small_512
-    #   class: data.bucket.AspectRatioDataset
-    #   batch_size: 128
-    #   # img_path: "/workspace/dataset/1_e621"
-    #   img_path: "/workspace/dataset/10_add_other"
-    #   target_area: 65_536
-    #   min_size: 512
-    #   max_size: 768
-    #   max_token_length: 225
-    #   load_into_memory: true
-    #   num_workers: 12
-    #   chunk_size_gb: 4
-    #   copy_workers: 8
+    - name: dan_dataset
+      class: data.bucket.AspectRatioDataset
+      batch_size: 128
+      # img_path: "/workspace/dataset/1_e621"
+      img_path: "/workspace/dataset/1_dan_dataset"
+      target_area: 1_048_576
+      min_size: 512
+      max_size: 2048
+      max_token_length: 225
+      load_into_memory: true
+      num_workers: 6
+      chunk_size_gb: 100
+      copy_workers: 16
       
 
 
@@ -152,7 +165,7 @@ sampling:
   seed: 1234
   height: 1280
   width: 768
-  every_n_steps: 50
+  every_n_steps: 100
   every_n_epochs: 1
   save_dir: "/workspace/output/sample/ep16"
   prompts: 

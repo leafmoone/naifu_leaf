@@ -12,6 +12,8 @@ from omegaconf import OmegaConf
 from pathlib import Path
 from lightning.fabric.strategies import DeepSpeedStrategy
 import safetensors.torch
+from data.bucket import DatasetExhausted
+
 os.environ['DEEPSPEED_DEBUG'] = '1'
 
 os.environ['NCCL_DEBUG'] = 'WARN'
@@ -22,14 +24,7 @@ logging.getLogger("lightning.pytorch").setLevel(logging.WARNING)
 
 logging.basicConfig(level=logging.WARNING)
 
-# 计算本地梯度范数:无用
-def local_grad_norm(model):
-    total = 0.0
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.detach().norm(2)
-            total += param_norm.item() ** 2
-    return total ** 0.5
+
 
 class Trainer:
     def __init__(self, fabric: pl.Fabric, config: OmegaConf):
@@ -127,9 +122,19 @@ class Trainer:
         logger.info(f"Saving train state to {path}")
         # Otherwise, save the full checkpoint with model, optimizer, and metadata
         strategy = self.fabric.strategy
+        # if hasattr(strategy, "_deepspeed_engine"):
+        #     logger.info("Saving DeepSpeed checkpoint")
+        #     strategy._deepspeed_engine.save_checkpoint(path, client_state=metadata)
         if hasattr(strategy, "_deepspeed_engine"):
-            logger.info("Saving DeepSpeed checkpoint")
-            strategy._deepspeed_engine.save_checkpoint(path, client_state=metadata)
+            engine = strategy._deepspeed_engine
+    
+            logger.info("Saving DeepSpeed checkpoint via engine.save_checkpoint")
+            engine.save_checkpoint(
+                path,
+                client_state=metadata
+            )
+            return
+
         elif hasattr(strategy, "_fsdp_kwargs"):
             logger.info("Saving FSDP checkpoint")
             self.fabric.save(path, {"model": self.model, "optimizer": self.optimizer, "metadata": metadata})
@@ -163,153 +168,254 @@ class Trainer:
             torch.cuda.set_rng_state(cuda_rng_state)
             if "schedulefree" in self.optimizer.__class__.__name__.lower():
                 self.optimizer.train()
-
+    
     def train_loop(self):
         config = self.model.config
         fabric = self.fabric
         cfg = config.trainer
     
-        logger.info(f"Config trainer: {cfg}")
-        logger.info("into train_loop")
-    
-        grad_accum_steps = cfg.accumulate_grad_batches
+        logger.info("=" * 80)
+        logger.info("Entering train_loop (Scheduler-based)")
+        logger.info(f"max_epochs={cfg.max_epochs}, max_steps={cfg.max_steps}")
+        logger.info("=" * 80)
     
         os.makedirs(cfg.checkpoint_dir, exist_ok=True)
-    
-        should_stop = False
-        if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
-            should_stop = True
-    
         self.prepare_logger()
     
-        # === 收集每个 dataset 的 chunk store ===
-        datasets = self.dataset.datasets
-        chunk_stores = [getattr(ds, "store", None) for ds in datasets]
-    
-        def is_chunked(store):
-            return store is not None and hasattr(store, "load_next_chunk")
-    
-        def has_next_chunk(store):
-            return (
-                is_chunked(store)
-                and store.current_chunk_idx < len(store.chunks) - 1
-            )
-    
         progress = ProgressBar(
-            total=len(self.dataloader),
+            total=1000000,
             disable=not fabric.is_global_zero,
         )
     
-        # ===epoch loop===
-        while not should_stop:
-            if "schedulefree" in self.optimizer.__class__.__name__.lower():
-                self.optimizer.train()
+        # ============================
+        # Dataset / Chunk info
+        # ============================
+        datasets = self.dataset.datasets
+        chunk_stores = [getattr(ds, "store", None) for ds in datasets]
     
-            # ====== chunk 状态机 ======
-            first_chunk = True
+        def has_next_chunk(store):
+            return (
+                store is not None
+                and store.current_chunk_idx < len(store.chunks) - 1
+            )
+    
+        logger.info(
+            f"[TrainLoop] start at epoch={self.current_epoch}, "
+            f"global_step={self.global_step}"
+        )
+    
+        if fabric.is_global_zero and self.is_deepspeed:
+            engine = fabric.strategy._deepspeed_engine
+            # logger.info(f"[DS] zero_stage = {engine.zero_optimization_stage()}")
+            # logger.info(f"[DS] gradient_clipping(method) = {engine.gradient_clipping}")
+            logger.info(
+                f"[DS] ds_config.gradient_clipping = "
+                f"{engine.config.get('gradient_clipping', None)}"
+            )
+    
+        # ============================
+        # Epoch loop
+        # ============================
+        num_sources = len(datasets)
+        alive = self.dataset.alive
+
+        while True:
+            if cfg.max_steps > 0 and self.global_step >= cfg.max_steps:
+                logger.info("[TrainLoop] max_steps reached, stopping")
+                break
+    
+            if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
+                logger.info("[TrainLoop] max_epochs reached, stopping")
+                break
+    
+            dataloader_iter = iter(self.dataloader)
     
             while True:
-                # ---- 是否需要切 chunk ----
-                if not first_chunk:
-                    if not any(has_next_chunk(store) for store in chunk_stores):
-                        break  # 所有 dataset 都没 chunk 了
-    
-                    logger.info(f"[Epoch {self.current_epoch}] Switching chunk(s)...")
-    
-                    # 只推进「还能推进的 dataset」
-                    for ds, store in zip(datasets, chunk_stores):
-                        if has_next_chunk(store):
-                            store.load_next_chunk()
-                            ds.init_batches()
-    
-                    # 所有 dataset 切完 chunk 后，再统一 reset
-                    self.dataset.start_epoch()
-    
-                    # 重建 dataloader
-                    _raw_loader = TorchDataLoader(
-                        self.dataset,
-                        batch_size=1,
-                        num_workers=self.dataloader.num_workers,
-                        collate_fn=lambda x: x[0],
-                        pin_memory=True,
-                    )
-                    self.dataloader = fabric.setup_dataloaders(_raw_loader)
-                    progress.set_total(len(self.dataloader))
+                try:
+                    batch = next(dataloader_iter)
 
-                    logger.info(
-                        "[ChunkState] " +
-                        ", ".join(
-                            f"{ds.name}:{store.current_chunk_idx + 1}/{len(store.chunks)}"
-                            for ds, store in zip(datasets, chunk_stores)
-                            if store is not None
+    
+                except DatasetExhausted as e:
+                    src = e.source_idx
+                    ds = datasets[src]
+                    store = chunk_stores[src]
+    
+                    logger.warning(
+                        f"[ChunkExhausted] source={getattr(ds,'name',src)} "
+                        f"chunk={store.current_chunk_idx+1}/{len(store.chunks)}"
+                    )
+    
+                    if has_next_chunk(store):
+                        # logger.info(
+                        #     f"[ChunkSwitch] source={getattr(ds,'name',src)} "
+                        #     f"→ load next chunk {store.current_chunk_idx+2}/{len(store.chunks)}"
+                        # )
+    
+                        store.load_next_chunk()
+                        ds.init_batches()
+    
+                        # 重建 dataloader & iterator
+                        raw_loader = TorchDataLoader(
+                            self.dataset,
+                            batch_size=None,
+                            num_workers=self.dataloader.num_workers,
+                            pin_memory=False,
                         )
-                    )
+                        self.dataloader = fabric.setup_dataloaders(raw_loader)
+                        dataloader_iter = iter(self.dataloader)
+    
+                        continue  # 继续训练
+    
+                    else:
+                        self.dataset.alive[src] = False
+                        self.dataset.mark_dead(src)
 
-    
-                first_chunk = False
-    
-                # ====== 训练当前 chunk 状态 ======
-                epoch_desc = f"Epoch {self.current_epoch}"
-                progress.update(epoch_desc, 0)
-                chunk_desc = " | ".join(
-                    f"{ds.name}:{store.current_chunk_idx + 1}/{len(store.chunks)}"
-                    for ds, store in zip(datasets, chunk_stores)
-                    if store is not None
-                )
+                        # self.dataset.alive[src] = False
+
+                        logger.info(
+                            f"[SourceFinished] source={ds.name} fully exhausted,alive:{alive}"
+                        )
+                        if not any(self.dataset.alive):
+                            logger.info("[EpochFinished] all sources exhausted")
+                            self.current_epoch += 1
+                            
+                            # 检查是否还要继续
+                            if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
+                                logger.info("[TrainLoop] max_epochs reached, stopping")
+                                logger.info(
+                                    f"[TrainLoop] finished at epoch={self.current_epoch}, "
+                                    f"global_step={self.global_step}"
+                                )
+                                self.on_post_training_batch(is_last=True)
+
+
+                                
+                                break
+                            
+                            # reset 所有 dataset / chunk
+                            for i, ds in enumerate(datasets):
+                                store = chunk_stores[i]
+                                if store is not None:
+                                    logger.info(
+                                        f"[EpochReset] reset source={ds.name} "
+                                        f"chunk {store.current_chunk_idx+1} → 1"
+                                    )
+                                    store.current_chunk_idx = 0
+                                    ds.init_batches()
+                            
+                            # reset scheduler alive 状态
+
+
+                            
+                            self.on_post_training_batch(is_last=True)
+
+
+
+                            
+                            self.dataset.reset_alive()
+                            
+                            # 重建 dataloader
+                            raw_loader = TorchDataLoader(
+                                self.dataset,
+                                batch_size=None,
+                                num_workers=self.dataloader.num_workers,
+                                pin_memory=False,
+                            )
+                            self.dataloader = fabric.setup_dataloaders(raw_loader)
+                            
+                            logger.info(
+                                f"[EpochStart] epoch={self.current_epoch} started"
+                            )
+
+
+
+                            
+                            break
                 
-
+                        raw_loader = TorchDataLoader(
+                            self.dataset,
+                            batch_size=None,
+                            num_workers=self.dataloader.num_workers,
+                            pin_memory=False,
+                        )
+                        self.dataloader = fabric.setup_dataloaders(raw_loader)
+                        dataloader_iter = iter(self.dataloader)
+                        continue
     
-                for batch_idx, batch in enumerate(self.dataloader):
-                    source = batch.get("source_dataset", "unknown")
+                except StopIteration:
+                    logger.info("[Epoch] dataloader exhausted")
+                    break
     
-                    raw_loss = self.model(batch)
-                    bs = batch["pixels"].shape[0]
-                    scaled_loss = (raw_loss / bs) * 4
+                source = batch["source_dataset"]
+                source_idx = batch.get("_source_idx", "n/a")
+                chunk_i = batch.get("_chunk_idx")
+                chunk_n = batch.get("_chunk_total")
     
-                    fabric.backward(scaled_loss)
+                # logger.info(
+                #     f"[Step {self.global_step}] "
+                #     f"batch from source={source} (idx={source_idx}) "
+                #     f"Train step | source={source} | chunk={chunk_i}/{chunk_n}"
+                # )
     
-                    grad_norm = None
-                    if fabric.is_global_zero and self.is_deepspeed:
-                        grad_norm = fabric.strategy._deepspeed_engine.get_global_grad_norm()
+                raw_loss = self.model(batch)
+                bs = batch["pixels"].shape[0]
+                scaled_loss = (raw_loss / bs)*4
+                logger.info(f"batch:{batch["pixels"].shape},bs:{bs}")
+                fabric.backward(scaled_loss)
     
-                    self.optimizer.step()
-                    self.optimizer.zero_grad(set_to_none=True)
-    
-                    if self.scheduler is not None:
-                        self.scheduler.step(self.global_step)
-    
-                    stat = f"loss={raw_loss.item():.4f}"
-                    if grad_norm is not None:
-                        stat += f", grad_norm={grad_norm:.4f}"
-    
-                    progress.update(
-                        f"{epoch_desc} |{chunk_desc}| {stat} | {source}",
-                        batch_idx + 1,
+                grad_norm = None
+                if fabric.is_global_zero and self.is_deepspeed:
+                    grad_norm = (
+                        fabric.strategy
+                        ._deepspeed_engine
+                        .get_global_grad_norm()
                     )
+                    # logger.warning(
+                    #     "grad_norm = fabric.strategy._deepspeed_engine.get_global_grad_norm()"
+                    # )
+    
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
+    
+                if self.scheduler is not None:
+                    self.scheduler.step(self.global_step)
+    
+                stat = f"raw_loss={raw_loss.item():.6f}"
+                if grad_norm is not None:
+                    stat += f", grad_norm={grad_norm:.6f}"
+                # else:
+                #     logger.warning(
+                #         f"fabric.is_global_zero:{fabric.is_global_zero} "
+                #         f"and self.is_deepspeed:{self.is_deepspeed}"
+                #     )
+    
+                desc = (
+                    f"Epoch {self.current_epoch} | "
+                    f"step {self.global_step} | "
+                    f"{stat} | source: {source} | chunk: {chunk_i}/{chunk_n}"
+                )
+    
+                progress.update(desc, self.global_step + 1)
+    
+                metrics = {
+                    "train/loss": raw_loss.item(),
+                    f"train/loss_{source}": raw_loss.item(),
+                }
+                if grad_norm is not None:
+                    metrics["train/grad_norm"] = grad_norm
+                    metrics[f"train/grad_norm_{source}"] = grad_norm
+    
+                if fabric.logger:
+                    fabric.log_dict(metrics, step=self.global_step)
+    
+                self.global_step += 1
+                self.on_post_training_batch()
+    
 
-                    metrics = {
-                        "train/loss": raw_loss.item(),
-                        f"train/loss_{source}": raw_loss.item(),
-                    }
-                    if grad_norm is not None:
-                        metrics["train/grad_norm"] = grad_norm
-                        metrics[f"train/grad_norm_{source}"] = grad_norm
     
-                    if fabric.logger:
-                        fabric.log_dict(metrics, step=self.global_step)
-    
-                    self.global_step += 1
-                    self.on_post_training_batch()
-                    # progress.set_total(len(self.dataloader))
-    
-            # ====== epoch 结束 ======
-            progress.close()
-            logger.info(f"Epoch {self.current_epoch} finished")
-    
-            self.current_epoch += 1
-            if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
-                should_stop = True
-    
-            self.on_post_training_batch(is_last=True)
-    
+        logger.info(
+            f"[TrainLoop] finished at epoch={self.current_epoch}, "
+            f"global_step={self.global_step}"
+        )
+        self.on_post_training_batch(is_last=True)
 

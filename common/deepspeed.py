@@ -400,3 +400,64 @@ fast_ds_strategy = DeepSpeedStrategy(
 
 def _fast_strategy():
     return fast_ds_strategy
+
+    
+sdxl_ds_strategy_noob = DeepSpeedStrategy(
+    stage=2,
+    config={
+        "bf16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 2,
+            "overlap_comm": True,
+            "contiguous_gradients": True,
+            "reduce_bucket_size": 1e9,
+            "allgather_bucket_size": 1e9,
+            "round_robin_gradients": True,
+            "prefetch_bucket_size": 1e9,
+            "stage3_max_live_parameters": 3e9,
+            "stage3_max_reuse_distance": 3e9,
+            "ignore_unused_parameters": True
+        },
+        "gradient_clipping": 2.0,
+        "gradient_accumulation_steps": 1,
+        # "train_micro_batch_size_per_gpu": 32,
+        # "train_batch_size": 32,
+        "wall_clock_breakdown": False,
+        "zero_allow_untested_optimizer": True,
+        "steps_per_print": 100,
+        "communication_data_type": "bf16",
+        "distributed": {
+            "init_method": "env://",
+            "nccl": {
+                "debug": 1,
+                "ib_timeout": 23,
+                "local_rank": -1
+            }
+        },
+        "amp": {
+            "enabled": False
+        },
+        "aio": {
+            "block_size": 2097152,
+            "queue_depth": 16,
+            "thread_count": 2,
+            "single_submit": False,
+            "overlap_events": True
+        },
+        "activation_checkpointing": {
+            "partition_activations": True,
+            "cpu_checkpointing": False,
+            "contiguous_memory_optimization": True,
+            "number_checkpoints": None,
+            "synchronize_checkpoint_boundary": False,
+            "profile": False
+        }
+    }
+)
+
+def _sdxl_strategy_noob():
+    return sdxl_ds_strategy_noob
+
+
