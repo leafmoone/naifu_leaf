@@ -30,7 +30,124 @@ import threading
 import re
 import logging
 from PIL import Image
+import duckdb
+import pickle
+import random
+import json as json_lib
 
+def flatten_tags(val):
+    if val is None or val == "" or str(val).strip() == "[]":
+        return ""
+    
+    val_str = str(val).strip()
+    
+    if val_str.startswith("[") and val_str.endswith("]"):
+        try:
+            parsed = json_lib.loads(val_str)
+            if isinstance(parsed, list):
+                return ", ".join([str(item).strip() for item in parsed if item])
+        except:
+            return val_str.strip("[]").replace('"', '').replace("'", "").strip()
+            
+    if isinstance(val, (list, np.ndarray)):
+        return ", ".join([str(v).strip() for v in val if v])
+        
+    return val_str
+
+
+
+
+def load_parquet_lookup(parquet_path, cache_dir=None):
+    if not parquet_path or not os.path.exists(parquet_path):
+        logger.error(f"Parquet path invalid: {parquet_path}")
+        return {}
+
+    parquet_path = Path(parquet_path)
+    if cache_dir is None:
+        cache_path = parquet_path.with_suffix('.lookup_cache.pkl')
+    else:
+        cache_path = Path(cache_dir) / f"{parquet_path.stem}_lookup.pkl"
+
+    if cache_path.exists():
+        p_mtime = os.path.getmtime(parquet_path)
+        c_mtime = os.path.getmtime(cache_path)
+        if c_mtime > p_mtime:
+            logger.info(f"Loading lookup from cache: {cache_path}")
+            try:
+                with open(cache_path, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load cache, re-scanning... Error: {e}")
+
+    logger.info(f"No valid cache found. Processing Parquet: {parquet_path}")
+    start_t = time.time()
+    
+    lookup = {}
+    with duckdb.connect(database=':memory:') as con:
+        con.execute("INSTALL json; LOAD json;")
+        p_sql = str(parquet_path).replace('\\', '/')
+        query = f"""
+            SELECT 
+                id::VARCHAR as id_str, 
+                general, rating, artist, character, 
+                height, width,
+                copyright, year,
+                resolution, nsfw,
+                aesthetics,
+                character_core_tags, character_image_count
+            FROM read_parquet('{p_sql}')
+        """
+        df = con.execute(query).df()
+
+    for _, row in df.iterrows():
+        clean_id = str(row['id_str']).split('.')[0].strip()
+        # lookup[clean_id] = {
+        #     "tags": {
+        #         "rating": str(row['rating'] or ""),
+        #         "artist": str(row['artist'] or ""),
+        #         "character": str(row['character'] or ""),
+        #         "general": str(row['general'] or ""),
+        #         "copyright": str(row['copyright'] or ""),
+        #         "year": str(row['year'] or ""),
+        #         "resolution": str(row['resolution'] or ""),
+        #         "nsfw": str(row['nsfw'] or ""),
+        #         "aesthetics": str(row['aesthetics'] or ""),
+        #     },
+        #     "character_core_tags": row["character_core_tags"],
+        #     "res": (int(row['height'] or 0), int(row['width'] or 0)),
+        #     "character_image_count": row['character_image_count'],
+        # }
+        lookup[clean_id] = {
+            "tags": {
+                "rating": flatten_tags(row['rating']),
+                "artist": flatten_tags(row['artist']),
+                "character": flatten_tags(row['character']),
+                "general": flatten_tags(row['general']),
+                "copyright": flatten_tags(row['copyright']),
+                "year": flatten_tags(row['year']),
+                "resolution": flatten_tags(row['resolution']),
+                "nsfw": flatten_tags(row['nsfw']),
+                "aesthetics": flatten_tags(row['aesthetics']),
+            },
+            "character_core_tags": flatten_tags(row["character_core_tags"]),
+            "res": (int(row['height']), int(row['width'])),
+            "character_image_count": row['character_image_count'],
+        }
+
+    try:
+        with open(cache_path, 'wb') as f:
+            pickle.dump(lookup, f)
+        logger.info(f"Lookup cached to {cache_path} (Time taken: {time.time()-start_t:.2f}s)")
+    except Exception as e:
+        logger.warning(f"Failed to save cache: {e}")
+
+    return lookup
+
+
+
+
+
+    
 image_suffix = set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp"])
 
 IMAGE_TRANSFORMS = transforms.Compose(
@@ -430,8 +547,12 @@ class ChunkedDirectoryImageStore(StoreBase):
         self.copy_workers = kwargs.get("copy_workers", 8)
         self.use_shm = True
         self.transforms = IMAGE_TRANSFORMS
+        self.parquet_path=Path("/workspace/dataset/dan_for_chenkin.parquet")
         super().__init__(*args, **kwargs)
         label_ext = self.kwargs.get("label_ext", ".txt")
+        # self.parquet_path = kwargs.get("parquet_path", None)
+        self.lookup_dict = load_parquet_lookup(self.parquet_path) if self.parquet_path else {}
+        
         # copy_workers = self.kwargs.get("copy_workers", 8)
 
         logger.warning(f"chunk_size_gb:{self.chunk_size_gb},copy_workers:{self.copy_workers}")
@@ -495,37 +616,14 @@ class ChunkedDirectoryImageStore(StoreBase):
             self._log(f"Scanned {total_files} paths in {time.time()-start_t:.2f}s.")
             self._log(f"Starting PARALLEL metadata extraction (Thread Pool)...")
 
-            def process_single_entry(p):
-                try:
-                    f_size = p.stat().st_size
-                    w, h = imagesize.get(str(p))
-                    
-                    p_txt = p.with_suffix(label_ext)
-                    prompt = ""
-                    if p_txt.exists():
-                        try:
-                            with open(p_txt, "r", encoding="utf-8", errors="ignore") as f:
-                                prompt = f.read().strip()
-                        except Exception as e:
-                            self._log(f"Error reading {p_txt}: {e}")
-            
-                    # self._log(f"Processed {p} with prompt: {prompt} and resolution: {w}x{h}")
-                    return {
-                        "path": p,
-                        "prompt": prompt,
-                        "res": (h, w),
-                        "bytes": f_size
-                    }
-                except Exception as e:
-                    self._log(f"Failed to process {p}: {e}")  # Log the error for debugging
-                    return None
+
     
     
             max_workers = 64 
             results = []
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(process_single_entry, p) for p in all_paths]
+                futures = [executor.submit(self.process_single_entry, p,self.lookup_dict) for p in all_paths]
                 
                 iterator = as_completed(futures)
                 if rank == 0:
@@ -535,8 +633,11 @@ class ChunkedDirectoryImageStore(StoreBase):
                     res = future.result()
                     if res is not None:
                         results.append(res)
-
             self.all_entries = results
+
+            del self.lookup_dict
+
+            
             for entry in self.all_entries:
                 repeat, key = extract_repeat_key(entry["path"])
                 entry["dataset_key"] = key   
@@ -575,8 +676,8 @@ class ChunkedDirectoryImageStore(StoreBase):
             
             if dist.is_initialized():
                 dist.barrier()
-
-        self._log(f"Indexed {len(self.all_entries)} valid entries.")
+        if rank == 0:
+            self._log(f"Indexed {len(self.all_entries)} valid entries.")
 
         self.chunks = []
         current_chunk = []
@@ -597,8 +698,8 @@ class ChunkedDirectoryImageStore(StoreBase):
         
         if current_chunk:
             self.chunks.append(current_chunk)
-
-        self._log(f"Dataset split into {len(self.chunks)} chunks (Target: {self.chunk_size_gb} GB).")
+        if rank == 0:
+            self._log(f"Dataset split into {len(self.chunks)} chunks (Target: {self.chunk_size_gb} GB).")
         
         self.current_chunk_idx = 0
         
@@ -622,7 +723,8 @@ class ChunkedDirectoryImageStore(StoreBase):
         self.next_chunk_idx = 1 
 
         if len(self.chunks) > 0:
-            self._log(f"!!! INITIALIZATION START !!!")
+            if rank == 0:
+                self._log(f"!!! INITIALIZATION START !!!")
             self._load_chunk_to_shm(chunk_idx=0, buffer_path=self.buffers[0], is_background=False)
             if dist.is_initialized():
                 self._log("Waiting for Rank 0 to finish initial copy...")
@@ -630,14 +732,114 @@ class ChunkedDirectoryImageStore(StoreBase):
             self._build_map_and_switch(chunk_idx=0, buffer_path=self.buffers[0])
             
             if len(self.chunks) > 1:
-                self._log(f"Triggering initial background prefetch for Chunk 2...")
+                if rank == 0:
+                    self._log(f"Triggering initial background prefetch for Chunk 2...")
                 self._start_prefetch(chunk_idx=1, buffer_path=self.buffers[1])
-            self._log(f"!!! INITIALIZATION DONE !!!")
+            if rank == 0:
+                self._log(f"!!! INITIALIZATION DONE !!!")
         else:
-            logger.error("Dataset is empty!")
+            if rank == 0:
+                logger.error("Dataset is empty!")
 
-        # logger.info(f"repeat:{repeat},key:{key}")
 
+    # def process_single_entry(self, p, lookup=None):
+    #     try:
+    #         img_id = p.stem.strip()
+    #         f_size = p.stat().st_size
+            
+    #         match_id = None
+    #         if lookup:
+    #             if img_id in lookup:
+    #                 match_id = img_id
+    #             elif img_id.lstrip('0') in lookup:
+    #                 match_id = img_id.lstrip('0')
+    
+    #         if match_id:
+    #             data = lookup[match_id]
+    #             tags_dict = data["tags"]
+    #             components = []
+
+    #             for k in ["artist", "character", "copyright", "general","year","resolution","nsfw","aesthetics"]:
+    #                 val = tags_dict.get(k, "")
+    #                 if val and val.strip():
+    #                     components.append(val.strip())
+                
+    #             generated_prompt = ", ".join(components)
+    
+    #             return {
+    #                 "path": p, 
+    #                 "prompt": generated_prompt,  
+    #                 "tags": tags_dict,          
+    #                 "res": data["res"],
+    #                 "bytes": f_size,
+    #                 "from_parquet": True
+    #             }
+    def process_single_entry(self, p, lookup=None):
+        try:
+            img_id = p.stem.strip()
+            f_size = p.stat().st_size
+            
+            match_id = None
+            if lookup:
+                if img_id in lookup: match_id = img_id
+                elif img_id.lstrip('0') in lookup: match_id = img_id.lstrip('0')
+    
+            if match_id:
+                data = lookup[match_id]
+                tags_dict = data["tags"]
+                
+                components = []
+                order = ["artist", "character", "copyright", "general", "year", "resolution", "nsfw", "aesthetics"]
+                
+                for k in order:
+                    val = tags_dict.get(k, "")
+                    components.append(val)
+                
+                generated_prompt = ", ".join(components)
+    
+                return {
+                    "path": p, 
+                    "prompt": generated_prompt,
+                    "tags": tags_dict,
+                    "res": data["res"],
+                    "bytes": f_size,
+                    "from_parquet": True
+                }
+            w, h = imagesize.get(str(p))
+            p_txt = p.with_suffix(self.kwargs.get("label_ext", ".txt"))
+            prompt = ""
+            if p_txt.exists():
+                with open(p_txt, "r", encoding="utf-8", errors="ignore") as f:
+                    prompt = f.read().strip()
+            
+            return {
+                "path": p,
+                "prompt": prompt,
+                "res": (h, w),
+                "bytes": f_size,
+                "from_parquet": False
+            }
+        except Exception as e:
+            return None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            
     def _log(self, msg):
         try:
             if dist.is_initialized():
@@ -695,6 +897,7 @@ class ChunkedDirectoryImageStore(StoreBase):
                 end_t = time.time()
                 duration = end_t - start_t
                 speed = len(chunk_data) / duration if duration > 0 else 0
+                
                 self._log(f"[{thread_name}] Rank 0: FINISHED Copy. Success: {success_count}/{len(chunk_data)}. Time: {duration:.2f}s ({speed:.1f} img/s)")
             
             except Exception as e:
@@ -705,25 +908,30 @@ class ChunkedDirectoryImageStore(StoreBase):
 
 
     def _start_prefetch(self, chunk_idx, buffer_path):
-        self._log(f"Creating background thread for Chunk {chunk_idx + 1} -> {buffer_path.name}")
+        if self.rank == 0:
+            self._log(f"Creating background thread for Chunk {chunk_idx + 1} -> {buffer_path.name}")
         self.prefetch_thread = threading.Thread(
             target=self._load_chunk_to_shm,
             args=(chunk_idx, buffer_path, True)
         )
         self.prefetch_thread.daemon = True 
         self.prefetch_thread.start()
-        self._log(f"Background thread started.")
+        if self.rank == 0:
+            self._log(f"Background thread started.")
 
     def _build_map_and_switch(self, chunk_idx, buffer_path):
         map_start = time.time()
-        self._log(f"Building path map for Chunk {chunk_idx + 1} from {buffer_path}...")
+        if self.rank == 0:
+            self._log(f"Building path map for Chunk {chunk_idx + 1} from {buffer_path}...")
         
         chunk_data = self.chunks[chunk_idx]
         self.path_map = {}
         
         for entry in chunk_data:
             src = entry["path"]
-            dst_name = f"{hashlib.sha1(str(src).encode()).hexdigest()}{src.suffix}"
+            # dst_name = f"{hashlib.sha1(str(src).encode()).hexdigest()}{src.suffix}"
+            dst_name = f"{hashlib.sha1(str(src).encode()).hexdigest()}_{src.name}"
+            
             dst = buffer_path / dst_name
             
             if dst.exists():
@@ -745,6 +953,7 @@ class ChunkedDirectoryImageStore(StoreBase):
         
         self.length = len(self.paths)
         map_duration = time.time() - map_start
+        
         self._log(f"Map built in {map_duration:.4f}s. Total images: {self.length}. Valid in SHM: {len(self.path_map)}")
 
     def load_next_chunk(self):
@@ -752,8 +961,8 @@ class ChunkedDirectoryImageStore(StoreBase):
         
         next_buffer_idx = (self.current_buffer_idx + 1) % 2
         target_chunk_idx = self.next_chunk_idx
-        
-        self._log(f"Target Chunk: {target_chunk_idx + 1}. Target Buffer: {self.buffers[next_buffer_idx].name}")
+        if self.rank == 0:
+            self._log(f"Target Chunk: {target_chunk_idx + 1}. Target Buffer: {self.buffers[next_buffer_idx].name}")
 
         if self.prefetch_thread:
             if self.prefetch_thread.is_alive():
@@ -778,13 +987,81 @@ class ChunkedDirectoryImageStore(StoreBase):
         prefetch_buffer_idx = (self.current_buffer_idx + 1) % 2
         
         self.next_chunk_idx = next_prefetch_chunk_idx
-        
-        self._log(f"Scheduling next prefetch: Chunk {next_prefetch_chunk_idx + 1} -> {self.buffers[prefetch_buffer_idx].name}")
+        if self.rank == 0:
+            self._log(f"Scheduling next prefetch: Chunk {next_prefetch_chunk_idx + 1} -> {self.buffers[prefetch_buffer_idx].name}")
         self._start_prefetch(next_prefetch_chunk_idx, self.buffers[prefetch_buffer_idx])
         
         # self._log(f"--- load_next_chunk COMPLETED ---")
 
+    def apply_tag_dropout(self,entry, config=None):
+        if config is None:
+            config = {
+                "parquet": {
+                    "character_drop": 0.1,           # artist, character, copyright
+                    "core_whole_drop": 0.5,    # character_core_tags 全丢概率
+                    "general_in_core_drop": 0.3, # core_tags 内部随机丢弃概率
+                    "general_not_core_drop": 0.2,  # 普通 general 标签丢弃概率
+                    "other_drop": 0.7,         # 质量词丢弃概率
+                },
+                "txt": {
+                    "tag_drop": 0.1,          # 非 Parquet 数据标签丢弃概率
+                }
+            }
+    
+        if entry.get("from_parquet") and "tags" in entry:
+            t = entry["tags"]
+            cfg = config["parquet"]
+            final_components = []
+    
+            for k in ["artist", "character", "copyright"]:
+                val = t.get(k, "")
+                if val and random.random() >= cfg["character_drop"]:
+                    final_components.append(val)
+    
+            general_str = t.get("general", "")
+            if general_str:
+                gen_list = [tag.strip() for tag in general_str.split(",") if tag.strip()]
+                
+                core_tags_str = entry.get("character_core_tags") or t.get("character_core_tags", "")
+                core_set = set([tag.strip() for tag in str(core_tags_str).split(",") if tag.strip()])
+                
+                in_core = [tag for tag in gen_list if tag in core_set]
+                not_in_core = [tag for tag in gen_list if tag not in core_set]
+                
+                kept_general = []
+                if random.random() >= cfg["core_whole_drop"]:
+                    kept_general.extend([tag for tag in in_core if random.random() >= cfg["general_in_core_drop"]])
+                
+                kept_general.extend([tag for tag in not_in_core if random.random() >= cfg["general_not_core_drop"]])
+                
+                if kept_general:
+                    final_components.append(", ".join(kept_general))
+    
+            meta_keys = ["rating", "year", "resolution", "nsfw", "aesthetics"]
+            for k in meta_keys:
+                val = t.get(k, "")
+                if val and random.random() >= cfg["other_drop"]:
+                    final_components.append(str(val))
+    
+            return ", ".join(final_components)
+    
+        else:
+            original_prompt = entry.get("prompt", "")
+            logger.error("no prompt from parquet,load from txt")
+            # if not original_prompt:
+            #     logger.error("no original_prompt")
+            #     return ""
+            
+            cfg_txt = config["txt"]
+            tag_list = [tag.strip() for tag in original_prompt.split(",") if tag.strip()]
+            kept_tags = [tag for tag in tag_list if random.random() >= cfg_txt["tag_drop"]]
+            # logger.error(f"load from txt:{kept_tags}")
+            logger.warning(f"Fallback to TXT for {entry['path'].name}. Prompt was: {original_prompt}\n")
+            final_txt_prompt = ", ".join(kept_tags)
+            logger.error(f"after dropout load from txt: {final_txt_prompt}\n")
+            return final_txt_prompt
 
+        
     def get_raw_entry(self, index, visited=None):
         if visited is None:
             visited = set()
@@ -796,18 +1073,28 @@ class ChunkedDirectoryImageStore(StoreBase):
             )
         visited.add(index)
     
-        # Get entry from all_entries using the index
         entry = self.all_entries[index]
         p = entry["path"]
-        prompt = entry["prompt"]
         h, w = entry["res"]
-        load_path = self.path_map.get(p, p)
+        
+        original_prompt = entry.get("prompt", "")
+        from_parquet = entry.get("from_parquet", False)
 
+
+        final_prompt = self.apply_tag_dropout(entry)
+
+        if random.random() < 0.005:
+            source = "Parquet" if entry.get("from_parquet") else "Txt"
+            logger.info(f"{entry}\n")
+            logger.info(f"[Dropout] Source: {source} | Result: {final_prompt}")
+
+        load_path = self.path_map.get(p, p)
         try:
             with Image.open(load_path) as _img:
                 img_pil = _img.convert("RGB")
             img = self.transforms(img_pil)
-            return False, img, prompt, (h, w), (0, 0), entry
+            
+            return False, img, final_prompt, (h, w), (0, 0), entry
     
         except Exception as e:
             bad = getattr(self, "_bad_indices", None)
@@ -819,8 +1106,10 @@ class ChunkedDirectoryImageStore(StoreBase):
                 f"Error loading {load_path} (index {index}): {e}. "
                 f"Skipping this sample and trying another one."
             )
-            next_index = (index + 1) % self.length
+            next_index = (index + 1) % len(self.all_entries)
             return self.get_raw_entry(next_index, visited)
+
+
 
 
     def __len__(self):

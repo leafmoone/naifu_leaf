@@ -94,10 +94,10 @@ dataset:
   shuffle: true
 
   datasets:
-    - name: main_1024
+    - name: 1_e621_1024
       class: data.bucket.AspectRatioDataset
       batch_size: 128
-      img_path: "/workspace/dataset/10_add_other"
+      img_path: "/workspace/dataset/1_e621"
       target_area: 1_048_576
       min_size: 512
       max_size: 2048
@@ -106,12 +106,13 @@ dataset:
       num_workers: 1
       chunk_size_gb: 10
       copy_workers: 12
+      
 
-    - name: small_256
+    - name: 1_dan_dataset_512
       class: data.bucket.AspectRatioDataset
       batch_size: 512
-      # img_path: "/workspace/dataset/1_e621"
-      img_path: "/workspace/dataset/1_e621"
+      img_path: "/workspace/dataset/1_dan_dataset"
+      # img_path: "/workspace/dataset/1_dan_dataset"
       target_area: 65_536
       min_size: 256
       max_size: 512
@@ -121,19 +122,19 @@ dataset:
       chunk_size_gb: 50
       copy_workers: 16
 
-    - name: dan_dataset
-      class: data.bucket.AspectRatioDataset
-      batch_size: 128
-      # img_path: "/workspace/dataset/1_e621"
-      img_path: "/workspace/dataset/1_dan_dataset"
-      target_area: 1_048_576
-      min_size: 512
-      max_size: 2048
-      max_token_length: 225
-      load_into_memory: true
-      num_workers: 6
-      chunk_size_gb: 100
-      copy_workers: 16
+    # - name: dan_dataset
+    #   class: data.bucket.AspectRatioDataset
+    #   batch_size: 128
+    #   # img_path: "/workspace/dataset/1_e621"
+    #   img_path: "/workspace/dataset/1_dan_dataset"
+    #   target_area: 1_048_576
+    #   min_size: 512
+    #   max_size: 2048
+    #   max_token_length: 225
+    #   load_into_memory: true
+    #   num_workers: 6
+    #   chunk_size_gb: 100
+    #   copy_workers: 16
       
 
 

@@ -12,6 +12,11 @@ from torchvision.transforms import Resize, InterpolationMode
 from common.logging import logger
 from common.utils import get_class
 
+
+
+
+
+
 image_suffix = set([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp"])
 
 

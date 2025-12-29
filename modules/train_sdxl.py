@@ -60,10 +60,10 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
             dl = TorchDataLoader(
                 ds,
                 batch_size=1,
-                shuffle=False,
                 num_workers=ds.num_workers,
                 collate_fn=lambda x: x[0],
-                pin_memory=True,
+                pin_memory=False,
+                sampler=None,
                 # persistent_workers=True,
             )
 
