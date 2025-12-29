@@ -307,69 +307,6 @@ class AdaptiveSizeDataset(RatioDataset):
         self.bucket_content = [v for k, v in self.bucket_content.items()]
 
 
-
-# class MultiSourceDataset(Dataset):
-#     def __init__(self, datasets, config=None, shuffle=True):
-#         """
-#         datasets: List[RatioDataset]
-#         config: Configuration object containing `repeats_source`
-#         repeats_source:  List[int], same length as datasets
-#                           default = [1, 1, ..., 1]
-#         """
-#         # 从配置文件读取 repeats_source，如果没有则使用默认值
-#         self.repeats_source = config.get("repeats_source", [1] * len(datasets))
-#         logger.warning(f"repeats_source: {self.repeats_source}")
-        
-#         self.datasets = datasets
-#         self._log(f"repeats_source: {self.repeats_source}")
-#         assert len(self.datasets) == len(self.repeats_source)
-
-#         self.shuffle = shuffle
-
-#         self.epoch_plan = None
-#         self.ptrs = None
-
-#         self.start_epoch()
-
-#     def _log(self, msg):
-#         print(msg)
-
-#     def start_epoch(self):
-#         plan = []
-        
-#         for ds_idx, (ds, rep) in enumerate(zip(self.datasets, self.repeats_source)):
-#             self._log(f"Preparing dataset {ds_idx} (source: {ds.name}), Repeat: {rep}")
-#             for _ in range(rep):
-#                 plan.extend([ds_idx] * len(ds)) 
-
-#         if self.shuffle:
-#             rng = torch.randperm(len(plan))
-#             plan = [plan[i] for i in rng.tolist()]
-
-#         self.epoch_plan = plan
-#         self.ptrs = [0 for _ in self.datasets]
-
-#     def __len__(self):
-#         return len(self.epoch_plan)
-
-#     def __getitem__(self, idx):
-#         ds_idx = self.epoch_plan[idx]  # Get the dataset index from the epoch plan
-#         ds = self.datasets[ds_idx]  # Get the actual dataset
-
-#         ptr = self.ptrs[ds_idx]  # Get the pointer for the dataset
-#         if ptr >= len(ds):
-#             raise RuntimeError(
-#                 f"Dataset {ds.name} exhausted early. "
-#                 f"ptr={ptr}, len={len(ds)}"
-#             )
-
-#         batch = ds[ptr]  # Get the batch from the dataset
-#         self.ptrs[ds_idx] += 1  # Increment the pointer for this dataset
-
-#         batch["_source_idx"] = ds_idx  # Add the source index to the batch
-#         batch["source_dataset"] = ds.name  # Add the source dataset name to the batch
-
-#         return batch
 class DatasetExhausted(RuntimeError):
     def __init__(self, ds_idx):
         super().__init__(f"Dataset {ds_idx} exhausted")

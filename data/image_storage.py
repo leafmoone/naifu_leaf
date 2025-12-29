@@ -101,22 +101,7 @@ def load_parquet_lookup(parquet_path, cache_dir=None):
 
     for _, row in df.iterrows():
         clean_id = str(row['id_str']).split('.')[0].strip()
-        # lookup[clean_id] = {
-        #     "tags": {
-        #         "rating": str(row['rating'] or ""),
-        #         "artist": str(row['artist'] or ""),
-        #         "character": str(row['character'] or ""),
-        #         "general": str(row['general'] or ""),
-        #         "copyright": str(row['copyright'] or ""),
-        #         "year": str(row['year'] or ""),
-        #         "resolution": str(row['resolution'] or ""),
-        #         "nsfw": str(row['nsfw'] or ""),
-        #         "aesthetics": str(row['aesthetics'] or ""),
-        #     },
-        #     "character_core_tags": row["character_core_tags"],
-        #     "res": (int(row['height'] or 0), int(row['width'] or 0)),
-        #     "character_image_count": row['character_image_count'],
-        # }
+
         lookup[clean_id] = {
             "tags": {
                 "rating": flatten_tags(row['rating']),
@@ -684,7 +669,7 @@ class ChunkedDirectoryImageStore(StoreBase):
         current_chunk_size = 0
         limit_bytes = self.chunk_size_gb * 1024**3
         
-        # np.random.seed(42) 
+        np.random.seed(42) 
         np.random.shuffle(self.all_entries)
 
         for entry in self.all_entries:
@@ -710,12 +695,16 @@ class ChunkedDirectoryImageStore(StoreBase):
         # self.buffers = [
         #     Path(f"/dev/shm/{entry['dataset_key']}_buffer_0") for entry in self.all_entries
         # ]
+        # self.buffers = [
+        #     Path(f"/dev/shm/{entry['dataset_key']}_buffer_{i}") 
+        #     for entry in self.all_entries 
+        #     for i in [0, 1]
+        # ]
+        d_key = self.all_entries[0]['dataset_key'] if self.all_entries else "default"
         self.buffers = [
-            Path(f"/dev/shm/{entry['dataset_key']}_buffer_{i}") 
-            for entry in self.all_entries 
-            for i in [0, 1]
+            Path(f"/dev/shm/{d_key}_buffer_0"),
+            Path(f"/dev/shm/{d_key}_buffer_1")
         ]
-
 
         self.current_buffer_idx = 0 
         
@@ -950,8 +939,8 @@ class ChunkedDirectoryImageStore(StoreBase):
                 self.paths.append(entry["path"])
             self.prompts.append(entry["prompt"])
             self.raw_res.append(entry["res"])
-        
-        self.length = len(self.paths)
+        self.current_chunk_entries = self.chunks[chunk_idx]
+        self.length = len(self.current_chunk_entries)
         map_duration = time.time() - map_start
         
         self._log(f"Map built in {map_duration:.4f}s. Total images: {self.length}. Valid in SHM: {len(self.path_map)}")
@@ -1047,18 +1036,18 @@ class ChunkedDirectoryImageStore(StoreBase):
     
         else:
             original_prompt = entry.get("prompt", "")
-            logger.error("no prompt from parquet,load from txt")
-            # if not original_prompt:
-            #     logger.error("no original_prompt")
-            #     return ""
-            
+
+            if not original_prompt:
+                logger.error("no original_prompt")
+                return ""
             cfg_txt = config["txt"]
             tag_list = [tag.strip() for tag in original_prompt.split(",") if tag.strip()]
             kept_tags = [tag for tag in tag_list if random.random() >= cfg_txt["tag_drop"]]
             # logger.error(f"load from txt:{kept_tags}")
-            logger.warning(f"Fallback to TXT for {entry['path'].name}. Prompt was: {original_prompt}\n")
             final_txt_prompt = ", ".join(kept_tags)
-            logger.error(f"after dropout load from txt: {final_txt_prompt}\n")
+            if random.random()<0.01:
+                logger.warning(f"Fallback to TXT for {entry['path'].name}. Prompt was: {original_prompt}\n")
+                logger.error(f"after dropout load from txt: {final_txt_prompt}\n")
             return final_txt_prompt
 
         
@@ -1072,42 +1061,41 @@ class ChunkedDirectoryImageStore(StoreBase):
                 f"visited={len(visited)}"
             )
         visited.add(index)
-    
-        entry = self.all_entries[index]
-        p = entry["path"]
-        h, w = entry["res"]
-        
-        original_prompt = entry.get("prompt", "")
-        from_parquet = entry.get("from_parquet", False)
-
-
-        final_prompt = self.apply_tag_dropout(entry)
-
-        if random.random() < 0.005:
-            source = "Parquet" if entry.get("from_parquet") else "Txt"
-            logger.info(f"{entry}\n")
-            logger.info(f"[Dropout] Source: {source} | Result: {final_prompt}")
-
-        load_path = self.path_map.get(p, p)
-        try:
-            with Image.open(load_path) as _img:
-                img_pil = _img.convert("RGB")
-            img = self.transforms(img_pil)
+        skip_thresholds = [
+            (5000, 0.80),#1000  
+            (2000, 0.60), #800
+            (1000, 0.50), 
+        ]
+        # entry = self.all_entries[index]
+        while True:
+            if len(visited) >= self.length:
+                raise RuntimeError(f"ChunkedStore: All {self.length} images in current chunk were skipped or failed!")
             
-            return False, img, final_prompt, (h, w), (0, 0), entry
-    
-        except Exception as e:
-            bad = getattr(self, "_bad_indices", None)
-            if bad is None:
-                self._bad_indices = set()
-                bad = self._bad_indices
-            bad.add(index)
-            logger.error(
-                f"Error loading {load_path} (index {index}): {e}. "
-                f"Skipping this sample and trying another one."
-            )
-            next_index = (index + 1) % len(self.all_entries)
-            return self.get_raw_entry(next_index, visited)
+            visited.add(index)
+            
+            entry = self.current_chunk_entries[index]
+            
+            char_count = entry.get("character_image_count", 0)
+            
+            if entry.get("from_parquet") and char_count and char_count > 0:
+                skip_prob = 0.0
+                for threshold, prob in skip_thresholds:
+                    if char_count >= threshold:
+                        skip_prob = prob
+                        break 
+                
+                if random.random() < skip_prob:
+                    if random.random() < 0.01:
+                        logger.info(f"\n\n[Image Skip] Character count: {char_count}, prob: {skip_prob} | Path: {entry['path'].name}\n\n")
+                    
+                    index = (index + 1) % self.length
+                    continue 
+
+
+
+        
+
+            # return self.get_raw_entry(next_index, visited)
 
 
 
