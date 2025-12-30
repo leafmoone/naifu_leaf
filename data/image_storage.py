@@ -34,7 +34,7 @@ import duckdb
 import pickle
 import random
 import json as json_lib
-
+import pandas as pd
 def flatten_tags(val):
     if val is None or val == "" or str(val).strip() == "[]":
         return ""
@@ -61,6 +61,7 @@ def load_parquet_lookup(parquet_path, cache_dir=None):
     if not parquet_path or not os.path.exists(parquet_path):
         logger.error(f"Parquet path invalid: {parquet_path}")
         return {}
+
 
     parquet_path = Path(parquet_path)
     if cache_dir is None:
@@ -94,14 +95,20 @@ def load_parquet_lookup(parquet_path, cache_dir=None):
                 copyright, year,
                 resolution, nsfw,
                 aesthetics,
-                character_core_tags, character_image_count
+                character_core_tags, character_image_count,character_repeat
             FROM read_parquet('{p_sql}')
         """
         df = con.execute(query).df()
 
     for _, row in df.iterrows():
         clean_id = str(row['id_str']).split('.')[0].strip()
-
+        def safe_int(val, default=0):
+            if pd.isna(val):
+                return default
+            try:
+                return int(val)
+            except:
+                return default
         lookup[clean_id] = {
             "tags": {
                 "rating": flatten_tags(row['rating']),
@@ -116,7 +123,9 @@ def load_parquet_lookup(parquet_path, cache_dir=None):
             },
             "character_core_tags": flatten_tags(row["character_core_tags"]),
             "res": (int(row['height']), int(row['width'])),
-            "character_image_count": row['character_image_count'],
+            "character_image_count": safe_int(row['character_image_count'], 0),
+            "character_repeat": safe_int(row['character_repeat'], 1), 
+            # "artist_count": row['artist_count']
         }
 
     try:
@@ -532,12 +541,12 @@ class ChunkedDirectoryImageStore(StoreBase):
         self.copy_workers = kwargs.get("copy_workers", 8)
         self.use_shm = True
         self.transforms = IMAGE_TRANSFORMS
-        self.parquet_path=Path("/workspace/dataset/dan_for_chenkin.parquet")
+        self.parquet_path=Path("/workspace/dataset/dan_for_chenkin_25_12_29.parquet")
         super().__init__(*args, **kwargs)
         label_ext = self.kwargs.get("label_ext", ".txt")
         # self.parquet_path = kwargs.get("parquet_path", None)
         self.lookup_dict = load_parquet_lookup(self.parquet_path) if self.parquet_path else {}
-        
+        start_t = time.time()
         # copy_workers = self.kwargs.get("copy_workers", 8)
 
         logger.warning(f"chunk_size_gb:{self.chunk_size_gb},copy_workers:{self.copy_workers}")
@@ -554,38 +563,36 @@ class ChunkedDirectoryImageStore(StoreBase):
             rank = 0
 
         self.all_entries = []
+
         loaded_from_cache = False
         expanded = []
+      
 
+        self.real_char_counts = {}
+        self.real_artist_counts = {}
+    
         if cache_path.exists():
             self._log(f"Found cache file: {cache_path}. Loading directly...")
             try:
                 with open(cache_path, "r") as f:
                     cache_data = json.load(f)
-                    # print("Loaded cache data:", cache_data) 
-                
-                # for entry in cache_data:
-                #     entry["path"] = Path(entry["path"])
-                #     self.all_entries.append(entry)
-                #     repeat, key = extract_repeat_key(entry["path"])
-                #     # self._log(f"repeat:{repeat}, key:{key}")
-                #     entry["dataset_key"] = key  
-                #     # for _ in range(repeat):
-                #     #     expanded.append(entry)
-                # expanded.extend([entry] * repeat)
 
+                final_expanded = []
                 for entry in cache_data:
                     entry["path"] = Path(entry["path"])
                     self.all_entries.append(entry)
-                    repeat, key = extract_repeat_key(entry["path"])
-                    # self._log(f"repeat:{repeat}, key:{key}")
+                    folder_repeat, key = extract_repeat_key(entry["path"])
                     entry["dataset_key"] = key  
+                    # self._log(f"repeat:{repeat}, key:{key}")
+                    char_repeat = entry.get("character_repeat", 1) or 1
+                    total_repeat = folder_repeat * char_repeat
+                    # logger.warning(f"chat_repeat:{char_repeat},new use cache")
                 
-                    expanded.extend([entry] * repeat)
-                logger.warning(f"repeat:{repeat},new use cache")
+                    final_expanded.extend([entry] * total_repeat)
+                logger.warning(f"folder_repeat:{folder_repeat},new use cache")
                 
 
-                self.all_entries = expanded
+                self.all_entries = final_expanded
             
                 loaded_from_cache = True
                 self._log(f"Loaded {len(self.all_entries)} entries from cache.")
@@ -618,37 +625,29 @@ class ChunkedDirectoryImageStore(StoreBase):
                     res = future.result()
                     if res is not None:
                         results.append(res)
-            self.all_entries = results
+            training_list = []
+            
+            for entry in results:
+                folder_repeat, key = extract_repeat_key(entry["path"])
+                entry["dataset_key"] = key
+                
+                char_repeat = entry.get("character_repeat", 1) or 1
+                
+                total_repeat = folder_repeat * char_repeat
+                training_list.extend([entry] * total_repeat)
+            
+            self.all_entries = training_list
 
             del self.lookup_dict
-
-            
-            for entry in self.all_entries:
-                repeat, key = extract_repeat_key(entry["path"])
-                entry["dataset_key"] = key   
-                # self._log(f"key:{key},repeat:{repeat}")
-
-                # for _ in range(repeat):
-                #     expanded.append(entry)
-                expanded.extend([entry] * repeat)
-                
-            # self._log(f"{expanded}")
-
-            self.all_entries = expanded
-            # for entry in self.all_entries:
-            #     self._log(f"new: {entry["dataset_key"]}")
-    
-    
-            
             scan_duration = time.time() - start_t
             if rank == 0:
-                print(f"[Rank {rank}] Indexing finished. Valid: {len(self.all_entries)}/{total_files}. Time: {scan_duration:.2f}s")
-
+                print(f"[Rank {rank}] Indexing finished. Valid: {len(results)} original images. Total training entries: {len(self.all_entries)}. Time: {scan_duration:.2f}s")
+        
             if rank == 0:
-                self._log(f"Rank 0: Saving index to {cache_path} for next time...")
+                self._log(f"Rank 0: Saving unique index ({len(results)} entries) to {cache_path}...")
                 try:
                     serializable_entries = []
-                    for entry in self.all_entries:
+                    for entry in results: 
                         e_copy = entry.copy()
                         e_copy["path"] = str(e_copy["path"])
                         serializable_entries.append(e_copy)
@@ -658,9 +657,39 @@ class ChunkedDirectoryImageStore(StoreBase):
                     self._log("Cache saved successfully.")
                 except Exception as e:
                     self._log(f"Failed to save cache: {e}")
+
+      
+        if rank == 0:
+            self._log("Calculating real training counts for balancing...")
+
+        for entry in self.all_entries:
+            tags = entry.get("tags", {})
             
-            if dist.is_initialized():
-                dist.barrier()
+            # 统计角色数
+            # chars = str(tags.get("character", "")).split(",")
+            chars = [c.strip() for c in str(tags.get("character") or "").split(",") if c.strip()]
+            for c in chars:
+                c = c.strip()
+                if c:
+                    self.real_char_counts[c] = self.real_char_counts.get(c, 0) + 1
+            
+            # 统计画师数
+            artists = str(tags.get("artist", "")).split(",")
+            for a in artists:
+                a = a.strip()
+                if a:
+                    self.real_artist_counts[a] = self.real_artist_counts.get(a, 0) + 1
+
+        if rank == 0:
+            self._log(f"Counted {len(self.real_char_counts)} characters and {len(self.real_artist_counts)} artists.")
+
+    
+            
+   
+
+        
+        if dist.is_initialized():
+            dist.barrier()
         if rank == 0:
             self._log(f"Indexed {len(self.all_entries)} valid entries.")
 
@@ -687,19 +716,7 @@ class ChunkedDirectoryImageStore(StoreBase):
             self._log(f"Dataset split into {len(self.chunks)} chunks (Target: {self.chunk_size_gb} GB).")
         
         self.current_chunk_idx = 0
-        
-        # self.buffers = [
-        #     Path("/dev/shm/naifu_buffer_0"),
-        #     Path("/dev/shm/naifu_buffer_1")
-        # ]
-        # self.buffers = [
-        #     Path(f"/dev/shm/{entry['dataset_key']}_buffer_0") for entry in self.all_entries
-        # ]
-        # self.buffers = [
-        #     Path(f"/dev/shm/{entry['dataset_key']}_buffer_{i}") 
-        #     for entry in self.all_entries 
-        #     for i in [0, 1]
-        # ]
+
         d_key = self.all_entries[0]['dataset_key'] if self.all_entries else "default"
         self.buffers = [
             Path(f"/dev/shm/{d_key}_buffer_0"),
@@ -731,38 +748,6 @@ class ChunkedDirectoryImageStore(StoreBase):
                 logger.error("Dataset is empty!")
 
 
-    # def process_single_entry(self, p, lookup=None):
-    #     try:
-    #         img_id = p.stem.strip()
-    #         f_size = p.stat().st_size
-            
-    #         match_id = None
-    #         if lookup:
-    #             if img_id in lookup:
-    #                 match_id = img_id
-    #             elif img_id.lstrip('0') in lookup:
-    #                 match_id = img_id.lstrip('0')
-    
-    #         if match_id:
-    #             data = lookup[match_id]
-    #             tags_dict = data["tags"]
-    #             components = []
-
-    #             for k in ["artist", "character", "copyright", "general","year","resolution","nsfw","aesthetics"]:
-    #                 val = tags_dict.get(k, "")
-    #                 if val and val.strip():
-    #                     components.append(val.strip())
-                
-    #             generated_prompt = ", ".join(components)
-    
-    #             return {
-    #                 "path": p, 
-    #                 "prompt": generated_prompt,  
-    #                 "tags": tags_dict,          
-    #                 "res": data["res"],
-    #                 "bytes": f_size,
-    #                 "from_parquet": True
-    #             }
     def process_single_entry(self, p, lookup=None):
         try:
             img_id = p.stem.strip()
@@ -782,8 +767,9 @@ class ChunkedDirectoryImageStore(StoreBase):
                 
                 for k in order:
                     val = tags_dict.get(k, "")
-                    components.append(val)
-                
+                    if val:
+                        components.append(val.replace("_", " "))
+                random.shuffle(components)
                 generated_prompt = ", ".join(components)
     
                 return {
@@ -792,7 +778,10 @@ class ChunkedDirectoryImageStore(StoreBase):
                     "tags": tags_dict,
                     "res": data["res"],
                     "bytes": f_size,
-                    "from_parquet": True
+                    "from_parquet": True,
+                    "character_repeat": data.get("character_repeat", 1),
+                    "character_image_count": data.get("character_image_count", 0),
+                    "character_core_tags": data.get("character_core_tags", ""),
                 }
             w, h = imagesize.get(str(p))
             p_txt = p.with_suffix(self.kwargs.get("label_ext", ".txt"))
@@ -810,21 +799,6 @@ class ChunkedDirectoryImageStore(StoreBase):
             }
         except Exception as e:
             return None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -963,9 +937,9 @@ class ChunkedDirectoryImageStore(StoreBase):
                 self._log("Background thread already finished.")
         
         if dist.is_initialized():
-            # self._log("Entering Barrier (Waiting for Rank 0)...")
+            self._log("Entering Barrier (Waiting for Rank 0)...")
             dist.barrier()
-            # self._log("Exited Barrier.")
+            self._log("Exited Barrier.")
 
         self._build_map_and_switch(target_chunk_idx, self.buffers[next_buffer_idx])
         
@@ -993,25 +967,63 @@ class ChunkedDirectoryImageStore(StoreBase):
                     "other_drop": 0.7,         # 质量词丢弃概率
                 },
                 "txt": {
-                    "tag_drop": 0.1,          # 非 Parquet 数据标签丢弃概率
+                    "tag_drop": 0.5,          # 非 Parquet 数据标签丢弃概率
                 }
             }
     
         if entry.get("from_parquet") and "tags" in entry:
             t = entry["tags"]
+            # logger.info(f"before:{t}\n")
             cfg = config["parquet"]
             final_components = []
-    
-            for k in ["artist", "character", "copyright"]:
-                val = t.get(k, "")
-                if val and random.random() >= cfg["character_drop"]:
-                    final_components.append(val)
-    
+            char_raw = t.get("character") or ""
+            chars = [c.strip() for c in str(char_raw).split(",") if c.strip()]
+            kept_chars = []
+            for c in chars:
+                count = self.real_char_counts.get(c, 0)
+                if count > 500:
+                    prob = round(1.0 - (500.0 / count), 2)
+                    prob = max(0.0, min(prob, 0.95))
+                    # if random.random()<=0.1:
+                    #     logger.warning(f"char_count:{count},prob:{prob}")
+                else:
+                    prob = cfg["character_drop"] # 0.1
+                
+                if random.random() >= prob:
+                    kept_chars.append(c)
+            if kept_chars:
+                final_components.append(", ".join(kept_chars))         
+        
+            
+            artist_raw = t.get("artist") or ""
+            artists = [a.strip() for a in str(artist_raw).split(",") if a.strip()]
+            kept_artists = []
+            for a in artists:
+                count = self.real_artist_counts.get(a, 0)
+                
+                if count > 500:
+                    prob = round(1.0 - (500.0 / count), 2)
+                    prob = max(0.0, min(prob, 0.95))
+                    if random.random()<=0.1:
+                        logger.warning(f"artist_count:{count},prob:{prob}")
+                else:
+                    prob = cfg["character_drop"] # 0.1
+                
+                if random.random() >= prob:
+                    kept_artists.append(a)
+            
+            if kept_artists:
+                final_components.append(", ".join(kept_artists))      
+                
+            copy_val = t.get("copyright", "")
+            if copy_val and random.random() >= cfg["character_drop"]:
+                final_components.append(copy_val)                
+
+                
             general_str = t.get("general", "")
             if general_str:
-                gen_list = [tag.strip() for tag in general_str.split(",") if tag.strip()]
-                
-                core_tags_str = entry.get("character_core_tags") or t.get("character_core_tags", "")
+                gen_list = [tag.strip() for tag in general_str.split(",") if tag.strip()]                
+                core_tags_str = entry.get("character_core_tags") or ""            
                 core_set = set([tag.strip() for tag in str(core_tags_str).split(",") if tag.strip()])
                 
                 in_core = [tag for tag in gen_list if tag in core_set]
@@ -1031,7 +1043,8 @@ class ChunkedDirectoryImageStore(StoreBase):
                 val = t.get(k, "")
                 if val and random.random() >= cfg["other_drop"]:
                     final_components.append(str(val))
-    
+            final_components = [c.replace("_", " ") for c in final_components if c]
+            random.shuffle(final_components)
             return ", ".join(final_components)
     
         else:
@@ -1039,15 +1052,19 @@ class ChunkedDirectoryImageStore(StoreBase):
 
             if not original_prompt:
                 logger.error("no original_prompt")
+                logger.warning(f"Fallback to TXT for {entry['path'].name}. Prompt was: {original_prompt}\n")
                 return ""
             cfg_txt = config["txt"]
             tag_list = [tag.strip() for tag in original_prompt.split(",") if tag.strip()]
             kept_tags = [tag for tag in tag_list if random.random() >= cfg_txt["tag_drop"]]
             # logger.error(f"load from txt:{kept_tags}")
+            kept_tags = [t.replace("_", " ") for t in kept_tags]
+            random.shuffle(kept_tags)
             final_txt_prompt = ", ".join(kept_tags)
             if random.random()<0.01:
                 logger.warning(f"Fallback to TXT for {entry['path'].name}. Prompt was: {original_prompt}\n")
                 logger.error(f"after dropout load from txt: {final_txt_prompt}\n")
+            
             return final_txt_prompt
 
         
@@ -1055,43 +1072,35 @@ class ChunkedDirectoryImageStore(StoreBase):
         if visited is None:
             visited = set()
     
-        if index in visited:
-            raise RuntimeError(
-                f"ChunkedDirectoryImageStore: all candidates in current chunk are bad. "
-                f"visited={len(visited)}"
-            )
-        visited.add(index)
-        skip_thresholds = [
-            (5000, 0.80),#1000  
-            (2000, 0.60), #800
-            (1000, 0.50), 
-        ]
-        # entry = self.all_entries[index]
+ 
         while True:
-            if len(visited) >= self.length:
-                raise RuntimeError(f"ChunkedStore: All {self.length} images in current chunk were skipped or failed!")
+            if index in visited:
+                if len(visited) >= self.length:
+                    raise RuntimeError(f"All {self.length} images unusable!")
             
             visited.add(index)
             
             entry = self.current_chunk_entries[index]
             
-            char_count = entry.get("character_image_count", 0)
-            
-            if entry.get("from_parquet") and char_count and char_count > 0:
-                skip_prob = 0.0
-                for threshold, prob in skip_thresholds:
-                    if char_count >= threshold:
-                        skip_prob = prob
-                        break 
+
+            load_path = self.path_map.get(entry["path"], entry["path"])
+            try:
+                final_prompt = self.apply_tag_dropout(entry)
+                if random.random() < 0.001:
+                    logger.info(f"Final Prompt: {final_prompt}")
+
                 
-                if random.random() < skip_prob:
-                    if random.random() < 0.01:
-                        logger.info(f"\n\n[Image Skip] Character count: {char_count}, prob: {skip_prob} | Path: {entry['path'].name}\n\n")
-                    
-                    index = (index + 1) % self.length
-                    continue 
+                with Image.open(load_path) as _img:
+                    img_pil = _img.convert("RGB")
+                img = self.transforms(img_pil)
+                
+                h, w = entry["res"]
+                return False, img, final_prompt, (h, w), (0, 0), entry
 
-
+            except Exception as e:
+                logger.error(f"Error loading {load_path}: {e}")
+                index = (index + 1) % self.length
+                continue
 
         
 
