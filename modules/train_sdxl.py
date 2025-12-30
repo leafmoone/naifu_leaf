@@ -101,11 +101,6 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
         )
         dataloader = dataset.init_dataloader()
 
-    # logger.info(f"Dataset length: {len(dataset)}")
-
-    # =========================
-    # 3. Optimizer
-    # =========================
     logger.info("Building optimizer...")
     params_to_optim = [{"params": model.model.parameters()}]
 
@@ -146,69 +141,7 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
         )
         logger.info(f"Scheduler class: {scheduler.__class__.__name__}")
 
-    # # =========================
-    # # 4. Resume（只加载权重）
-    # # =========================
-    # # if config.trainer.get("resume"):
-    # #     latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
-    # #     logger.info(f"Resume enabled. Latest ckpt: {latest_ckpt}")
-    # #     if latest_ckpt:
-    # #         sd = load_torch_file(ckpt=latest_ckpt, extract=False)
-    # #         model.load_state_dict(sd.get("state_dict", sd))
-    # #         meta = sd.get("metadata", {})
-    # #         config.global_step = int(meta.get("global_step", 0))
-    # #         config.current_epoch = int(meta.get("current_epoch", 0))
-    # #         logger.info(
-    # #             f"Resumed at epoch={config.current_epoch}, step={config.global_step}"
-    # #         )
 
-    # # =========================
-    # # 5. Fabric 接管（🔥 最关键）
-    # # =========================
-    # logger.info("Calling fabric.setup(model, optimizer)...")
-
-    
-    # model, optimizer = fabric.setup(model, optimizer)
-    # logger.info("fabric.setup(model, optimizer) DONE")
-    # logger.info("fabric.setup(model, optimizer) 111111111111111111111111111111111111111111111")
-
-    # dataloader = fabric.setup_dataloaders(dataloader)
-    # if hasattr(model, "generate_samples"):
-    #     try:
-    #         model.mark_forward_method("generate_samples")
-    #         logger.info("[OK] generate_samples marked as forward method")
-    #     except Exception as e:
-    #         logger.warning(f"Failed to mark generate_samples: {e}")
-    # logger.info("fabric.setup_dataloaders DONE")
-
-    # # =========================
-    # # 6. 分布式类型确认
-    # # =========================
-    # if hasattr(fabric.strategy, "_deepspeed_engine"):
-    #     logger.info(">>> Distributed backend: DeepSpeed (Lightning Fabric)")
-    #     engine = fabric.strategy._deepspeed_engine
-    #     logger.info(f"DeepSpeed engine type: {type(engine)}")
-    #     logger.info(f"ZeRO stage: {engine.zero_optimization_stage()}")
-    #     model._distributed_type = "deepspeed"
-        
-    #     model.get_module = lambda: model
-    #     model._deepspeed_engine = fabric.strategy._deepspeed_engine
-
-    # elif hasattr(fabric.strategy, "_fsdp_kwargs"):
-    #     logger.info(">>> Distributed backend: FSDP (Lightning Fabric)")
-    #     model._distributed_type = "fsdp"
-
-    # else:
-    #     logger.info(">>> Distributed backend: DDP / Single GPU")
-    #     model._distributed_type = "ddp"
-
-    # model._fabric = fabric
-
-    # logger.info("setup() finished successfully")
-    # logger.info("=" * 80)
-    # model._fabric_wrapped = fabric
-
-    # return model, dataset, dataloader, optimizer, scheduler
 
     if config.trainer.get("resume"):
         latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)

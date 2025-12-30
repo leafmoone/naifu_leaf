@@ -39,15 +39,6 @@ advanced:
   do_edm_style_training: false
   gradient_checkpointing: true
   
-# lightning:
-#   accelerator: gpu
-#   devices: 8        
-#   num_nodes: 1        
-#   precision: bf16-mixed
-#   strategy: deepspeed 
-#   strategy_params:   
-#     stage: 2
-#     gradient_clipping: 1.0
 
 
 lightning:
@@ -56,36 +47,6 @@ lightning:
   strategy: common.deepspeed._sdxl_strategy_noob
   precision: bf16
 
-# lightning:
-#   accelerator: gpu
-#   devices: 8
-#   precision: bf16-mixed
-#   strategy: deepspeed
-
-#   strategy_params:
-#     deepspeed_config:
-#       zero_optimization:
-#         stage: 2
-
-#       gradient_clipping: 1.0
-
-#       bf16:
-#         enabled: true
-
-
-# dataset:
-#   name: data.bucket.AspectRatioDataset 
-#   target_area: 1_048_576 # 1024*1024
-#   min_size: 512
-#   max_size: 2048
-#   # img_path: "/workspace/dataset"
-#   img_path: "/workspace/dataset"
-#   # img_path: "/data/200_test"
-#   # num_workers: 0
-#   # process_batch_fn: "data.processors.shuffle_prompts_sdstyle"
-#   max_token_length: 225 # [75, 150, 225]
-#   load_into_memory: true
-#   num_workers: 12
 
 
 dataset:
@@ -96,8 +57,10 @@ dataset:
   datasets:
     - name: 1_e621_1024
       class: data.bucket.AspectRatioDataset
-      batch_size: 128
-      img_path: "/workspace/dataset/1_e621"
+      batch_size: 112
+      img_path: "/workspace/dataset/1_e621_db"
+      parquet_path: "/workspace/dataset/1_e621_db/e621_metadata.parquet"
+      dataset_source: "e621"
       target_area: 1_048_576
       min_size: 512
       max_size: 2048
@@ -108,10 +71,12 @@ dataset:
       copy_workers: 12
       
 
-    - name: 1_dan_dataset_512
+    - name: 1_dan_512
       class: data.bucket.AspectRatioDataset
-      batch_size: 512
+      batch_size: 496
       img_path: "/workspace/dataset/1_dan_dataset"
+      parquet_path: "/workspace/dataset/dan_for_chenkin_25_12_29.parquet"
+      dataset_source: "dan"
       # img_path: "/workspace/dataset/1_dan_dataset"
       target_area: 65_536
       min_size: 256
