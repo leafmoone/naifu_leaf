@@ -727,9 +727,28 @@ class ChunkedDirectoryImageStore(StoreBase):
         
         if current_chunk:
             self.chunks.append(current_chunk)
-        if rank == 0:
-            self._log(f"Dataset split into {len(self.chunks)} chunks (Target: {self.chunk_size_gb} GB).")
-        
+        if self.chunks:
+            if rank == 0:
+                self._log("--- Chunk Statistics (Original) ---")
+                for i, chunk in enumerate(self.chunks):
+                    self._log(f"Chunk {i+1:3d}: {len(chunk):7d} images")
+            
+            self.num_per_chunk = max(len(c) for c in self.chunks)
+            
+            if rank == 0:
+                self._log("-" * 35)
+                self._log(f"Target size for padding: {self.num_per_chunk}")
+                self._log("-" * 35)
+
+            for i in range(len(self.chunks)):
+                actual_len = len(self.chunks[i])
+                if actual_len < self.num_per_chunk:
+                    diff = self.num_per_chunk - actual_len
+                    padding = [self.chunks[i][j % actual_len] for j in range(diff)]
+                    self.chunks[i].extend(padding)
+        else:
+            self.num_per_chunk = 0
+
         self.current_chunk_idx = 0
 
         d_key = self.all_entries[0]['dataset_key'] if self.all_entries else "default"
@@ -931,7 +950,8 @@ class ChunkedDirectoryImageStore(StoreBase):
             self.prompts.append(entry["prompt"])
             self.raw_res.append(entry["res"])
         self.current_chunk_entries = self.chunks[chunk_idx]
-        self.length = len(self.current_chunk_entries)
+        # self.length = len(self.current_chunk_entries)
+        self.length = len(self.current_chunk_entries) 
         map_duration = time.time() - map_start
         
         self._log(f"Map built in {map_duration:.4f}s. Total images: {self.length}. Valid in SHM: {len(self.path_map)}")
@@ -1153,4 +1173,4 @@ class ChunkedDirectoryImageStore(StoreBase):
 
 
     def __len__(self):
-        return self.length
+        return self.num_per_chunk
