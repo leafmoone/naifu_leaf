@@ -66,26 +66,26 @@ dataset:
       max_size: 2048
       max_token_length: 225
       load_into_memory: true
-      num_workers: 1
+      num_workers: 2
       chunk_size_gb: 10
-      copy_workers: 12
+      copy_workers: 6
       
 
     - name: 1_dan_512
       class: data.bucket.AspectRatioDataset
-      batch_size: 496
+      batch_size: 512
       img_path: "/workspace/dataset/1_dan_dataset"
       parquet_path: "/workspace/dataset/dan_for_chenkin_25_12_29.parquet"
       dataset_source: "dan"
       # img_path: "/workspace/dataset/1_dan_dataset"
-      target_area: 65_536
+      target_area: 262_144
       min_size: 256
       max_size: 512
       max_token_length: 225
       load_into_memory: true
-      num_workers: 2
-      chunk_size_gb: 300
-      copy_workers: 16
+      num_workers: 3
+      chunk_size_gb: 100
+      copy_workers: 12
       
     - name: 10_nailong_1024
       class: data.bucket.AspectRatioDataset
@@ -99,9 +99,9 @@ dataset:
       max_size: 2048
       max_token_length: 225
       load_into_memory: true
-      num_workers: 2
+      num_workers: 1
       chunk_size_gb: 10
-      copy_workers: 16
+      copy_workers: 8
     # - name: dan_dataset
     #   class: data.bucket.AspectRatioDataset
     #   batch_size: 128

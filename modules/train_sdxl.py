@@ -62,7 +62,7 @@ def setup(fabric: pl.Fabric, config: OmegaConf):
                 batch_size=1,
                 num_workers=ds.num_workers,
                 collate_fn=lambda x: x[0],
-                pin_memory=False,
+                pin_memory=True,
                 sampler=None,
                 # persistent_workers=True,
             )

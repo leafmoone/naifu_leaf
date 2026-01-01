@@ -591,6 +591,8 @@ class ChunkedDirectoryImageStore(StoreBase):
             try:
                 with open(cache_path, "r") as f:
                     cache_data = json.load(f)
+                    
+                cache_data.sort(key=lambda x: str(x["path"]))
 
                 final_expanded = []
                 for entry in cache_data:
@@ -640,6 +642,9 @@ class ChunkedDirectoryImageStore(StoreBase):
                     res = future.result()
                     if res is not None:
                         results.append(res)
+
+            results.sort(key=lambda x: str(x["path"])) 
+                        
             training_list = []
             
             for entry in results:
@@ -1161,7 +1166,9 @@ class ChunkedDirectoryImageStore(StoreBase):
                 return False, img, final_prompt, (h, w), (0, 0), entry
 
             except Exception as e:
-                logger.error(f"Error loading {load_path}: {e}")
+                if len(visited) <= 1:
+                    logger.error(f"DEBUG - First image load failed! Path: {load_path}, Error: {e}")
+                
                 index = (index + 1) % self.length
                 continue
 
